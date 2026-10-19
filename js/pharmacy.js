@@ -276,11 +276,11 @@ function openOrderModal(products, suppliers, onClose) {
           <h4 style="margin:0;">Productos de la orden</h4>
           <button type="button" class="btn sm" id="btn-add-product">+ Agregar producto</button>
         </div>
-        
+
         <div style="background:#f5f5f5; padding:0.5rem; border-radius:4px; margin-bottom:0.5rem; font-size:0.85em;">
           <strong>Campos obligatorios por producto:</strong> Producto, Cantidad, Precio, <span style="color:#c62828">Lote</span> y <span style="color:#c62828">Vencimiento</span>
         </div>
-        
+
         <div id="order-items"></div>
         <div style="display:flex; justify-content:flex-end; margin-top:0.5rem; font-size:1.2rem;">
           <strong>Total: <span id="order-total">Q0.00</span></strong>
@@ -300,6 +300,7 @@ function openOrderModal(products, suppliers, onClose) {
   const itemsEl = $('#order-items', el);
   const totalEl = $('#order-total', el);
 
+  // Renderiza las tarjetas de productos (solo se llama al agregar/eliminar)
   const paintItems = () => {
     itemsEl.innerHTML = items.length
       ? items.map((item, idx) => `
@@ -307,45 +308,60 @@ function openOrderModal(products, suppliers, onClose) {
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.5rem; margin-bottom:0.5rem;">
             <div>
               <label style="font-size:0.9em; font-weight:bold;">Producto *</label>
-              <select data-idx="${idx}" data-field="product_id" required style="width:100%">
+              <select data-idx="${idx}" data-field="product_id" style="width:100%">
                 <option value="">Seleccionar producto...</option>
                 ${products.map(p => `<option value="${p.id}" ${p.id === item.product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
               </select>
             </div>
             <div>
               <label style="font-size:0.9em; font-weight:bold;">Cantidad *</label>
-              <input type="number" data-idx="${idx}" data-field="quantity" value="${item.quantity}" min="1" required placeholder="Ej: 100" style="width:100%">
+              <input type="number" data-idx="${idx}" data-field="quantity" value="${item.quantity}" min="1" style="width:100%">
             </div>
           </div>
-          
+
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.5rem; margin-bottom:0.5rem;">
             <div>
               <label style="font-size:0.9em; font-weight:bold;">Precio unitario (Q) *</label>
-              <input type="number" data-idx="${idx}" data-field="unit_price" value="${item.unit_price}" step="0.01" min="0" required placeholder="Ej: 25.50" style="width:100%">
+              <input type="number" data-idx="${idx}" data-field="unit_price" value="${item.unit_price}" step="0.01" min="0" style="width:100%">
             </div>
             <div>
               <label style="font-size:0.9em; font-weight:bold; color:#c62828;">Número de Lote * <span style="font-size:0.8em; font-weight:normal;">(del proveedor)</span></label>
-              <input type="text" data-idx="${idx}" data-field="batch_number" value="${item.batch_number}" required placeholder="Ej: LOT-2026-001" style="width:100%; border:2px solid #ffcdd2;">
+              <input type="text" data-idx="${idx}" data-field="batch_number" value="${esc(item.batch_number)}" placeholder="Ej: LOT-2026-001" style="width:100%; border:2px solid #ffcdd2;">
             </div>
           </div>
-          
+
           <div style="display:grid; grid-template-columns: 1fr auto; gap:0.5rem; align-items:end;">
             <div>
               <label style="font-size:0.9em; font-weight:bold; color:#c62828;">Fecha de Vencimiento * <span style="font-size:0.8em; font-weight:normal;">(según proveedor)</span></label>
-              <input type="date" data-idx="${idx}" data-field="expiration_date" value="${item.expiration_date}" required style="width:100%; border:2px solid #ffcdd2;">
+              <input type="date" data-idx="${idx}" data-field="expiration_date" value="${item.expiration_date || ''}" style="width:100%; border:2px solid #ffcdd2;">
             </div>
             <button type="button" class="btn sm bad" data-remove="${idx}" style="margin-bottom:0;">✕ Eliminar</button>
           </div>
-          
-          <div style="margin-top:0.5rem; text-align:right; font-size:0.9em; color:#666;">
+
+          <div data-subtotal="${idx}" style="margin-top:0.5rem; text-align:right; font-size:0.9em; color:#666;">
             Subtotal: <strong>Q${(Number(item.quantity || 0) * Number(item.unit_price || 0)).toFixed(2)}</strong>
           </div>
         </div>
       `).join('')
       : '<p class="muted">Sin productos. Presione "+ Agregar producto" para comenzar.</p>';
 
-    const total = items.reduce((sum, i) => sum + (Number(i.quantity) * Number(i.unit_price)), 0);
+    updateTotal();
+  };
+
+  // Actualiza SOLO el total general (sin reconstruir el DOM)
+  const updateTotal = () => {
+    const total = items.reduce((sum, i) => sum + (Number(i.quantity || 0) * Number(i.unit_price || 0)), 0);
     totalEl.textContent = money(total);
+  };
+
+  // Actualiza SOLO el subtotal de un producto específico (sin reconstruir el DOM)
+  const updateSubtotal = (idx) => {
+    const item = items[idx];
+    const subtotal = Number(item.quantity || 0) * Number(item.unit_price || 0);
+    const subtotalEl = $(`[data-subtotal="${idx}"]`, el);
+    if (subtotalEl) {
+      subtotalEl.innerHTML = `Subtotal: <strong>Q${subtotal.toFixed(2)}</strong>`;
+    }
   };
 
   $('#btn-add-product', el).onclick = () => {
@@ -353,13 +369,34 @@ function openOrderModal(products, suppliers, onClose) {
     paintItems();
   };
 
+  // FIX CRÍTICO: NO re-renderizar en cada input. Solo actualizar el modelo y el subtotal.
   itemsEl.oninput = e => {
     const idx = e.target.dataset.idx;
     const field = e.target.dataset.field;
-    if (idx !== undefined && field) {
-      items[Number(idx)][field] = field === 'product_id' || field === 'batch_number' ? e.target.value : Number(e.target.value);
-      paintItems();
+    if (idx === undefined || !field) return;
+
+    const i = Number(idx);
+
+    // Campos que se guardan como string (NO convertir a Number)
+    if (field === 'product_id' || field === 'batch_number' || field === 'expiration_date') {
+      items[i][field] = e.target.value;
+    } else {
+      // Campos numéricos
+      items[i][field] = e.target.value === '' ? 0 : Number(e.target.value);
     }
+
+    // Actualizar solo subtotal y total, sin reconstruir el DOM
+    updateSubtotal(i);
+    updateTotal();
+  };
+
+  // Cambio de producto (select) también dispara 'change', lo manejamos aquí
+  itemsEl.onchange = e => {
+    const idx = e.target.dataset.idx;
+    const field = e.target.dataset.field;
+    if (idx === undefined || !field) return;
+    // Ya se procesó en oninput, solo aseguramos consistencia
+    items[Number(idx)][field] = e.target.value;
   };
 
   itemsEl.onclick = e => {
@@ -376,39 +413,42 @@ function openOrderModal(products, suppliers, onClose) {
 
     if (items.length === 0) return fail('Agregue al menos un producto a la orden.');
 
-    const cleanItems = items.map(item => {
+    const cleanItems = items.map((item, idx) => {
       const product = products.find(p => p.id === item.product_id);
       return {
+        idx: idx + 1,
         product_id: item.product_id,
         product_name: product?.name || 'N/A',
         quantity: Number(item.quantity),
         unit_price: Number(item.unit_price),
-        batch_number: item.batch_number,
-        expiration_date: item.expiration_date
+        batch_number: String(item.batch_number || '').trim(),
+        expiration_date: String(item.expiration_date || '').trim()
       };
     });
 
-    // Validación más específica
+    // Validación específica por producto
     const missing = [];
-    cleanItems.forEach((item, idx) => {
+    cleanItems.forEach(item => {
       const errors = [];
       if (!item.product_id) errors.push('Producto');
       if (!item.batch_number) errors.push('Lote');
       if (!item.expiration_date) errors.push('Vencimiento');
+      if (item.quantity < 1) errors.push('Cantidad (mínimo 1)');
+      if (item.unit_price <= 0) errors.push('Precio (debe ser mayor a 0)');
       if (errors.length > 0) {
-        missing.push(`Producto ${idx + 1}: faltan ${errors.join(', ')}`);
+        missing.push(`Producto ${item.idx}: faltan ${errors.join(', ')}`);
       }
     });
 
     if (missing.length > 0) {
-      return fail('Campos incompletos:\n' + missing.join('\n'));
+      return fail('Campos incompletos:\n• ' + missing.join('\n• '));
     }
 
     const total = cleanItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
 
     const { error } = await sb.from('purchase_orders').insert({
       supplier_id: formData.get('supplier_id'),
-      items: cleanItems,
+      items: cleanItems.map(({ idx, ...rest }) => rest), // quitar idx antes de guardar
       total: total,
       status: 'pendiente',
       notes: formData.get('notes') || null
