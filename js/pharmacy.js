@@ -5,8 +5,8 @@ export async function render(el) {
   
   console.log('[pharmacy] Rol actual:', S.profile?.role, '| isPharmacist:', isPharmacist);
   
-  // Cargar datos en paralelo con manejo de errores
-  const [rxRes, productsRes, batchesRes, movementsRes, suppliersRes, ordersRes] = await Promise.all([
+  // Cargar datos en paralelo (sin el join problemático de profiles en inventory_movements)
+  const [rxRes, productsRes, batchesRes, movementsRes, suppliersRes, ordersRes, profilesRes] = await Promise.all([
     sb.from('prescriptions').select(`
       *,
       patient:patients(first_name, last_name, dpi),
@@ -15,14 +15,14 @@ export async function render(el) {
     `).order('created_at', { ascending: false }).limit(50),
     sb.from('products').select('*').order('name'),
     isPharmacist ? sb.from('product_batches').select('*, products(name)').order('expiration_date').limit(100) : Promise.resolve({ data: [], error: null }),
-    isPharmacist ? sb.from('inventory_movements').select('*, products(name), profiles(full_name)').order('performed_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null }),
+    isPharmacist ? sb.from('inventory_movements').select('*, products(name)').order('performed_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null }),
     isPharmacist ? sb.from('suppliers').select('*').eq('is_active', true).order('name') : Promise.resolve({ data: [], error: null }),
-    isPharmacist ? sb.from('purchase_orders').select('*, suppliers(name)').order('created_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null })
+    isPharmacist ? sb.from('purchase_orders').select('*, suppliers(name)').order('created_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null }),
+    isPharmacist ? sb.from('profiles').select('id, full_name') : Promise.resolve({ data: [], error: null })
   ]);
 
-  // Log de errores para diagnóstico
-  if (suppliersRes.error) console.error('[pharmacy] Error cargando proveedores:', suppliersRes.error);
-  if (ordersRes.error) console.error('[pharmacy] Error cargando órdenes:', ordersRes.error);
+  if (movementsRes.error) console.error('[pharmacy] Error movimientos:', movementsRes.error);
+  if (suppliersRes.error) console.error('[pharmacy] Error proveedores:', suppliersRes.error);
 
   const rx = rxRes.data;
   const products = productsRes.data;
@@ -30,6 +30,7 @@ export async function render(el) {
   const movements = movementsRes.data || [];
   const suppliers = suppliersRes.data || [];
   const orders = ordersRes.data || [];
+  const userNames = Object.fromEntries((profilesRes.data || []).map(u => [u.id, u.full_name]));
 
   console.log('[pharmacy] Proveedores cargados:', suppliers.length);
 
@@ -47,22 +48,6 @@ export async function render(el) {
         <button class="btn" id="btn-manage-suppliers">Gestionar Proveedores</button>
       ` : ''}
     </div>
-
-    ${!isPharmacist ? `
-    <div class="card" style="background:#fff3cd; border-left:4px solid #ffc107;">
-      <h3 style="color:#856404">⚠️ Acceso Restringido</h3>
-      <p class="muted">Solo administradores y farmacéuticos pueden gestionar inventario, proveedores y órdenes de compra.</p>
-      <p class="muted"><strong>Tu rol actual:</strong> ${esc(S.profile?.role || 'desconocido')}</p>
-    </div>
-    ` : ''}
-
-    ${suppliersRes.error ? `
-    <div class="card" style="background:#ffebee; border-left:4px solid #f44336;">
-      <h3 style="color:#c62828">❌ Error cargando proveedores</h3>
-      <p class="muted">${esc(suppliersRes.error.message)}</p>
-      <p class="muted">Verifica que tu rol sea admin o pharmacist, y que la tabla suppliers exista.</p>
-    </div>
-    ` : ''}
 
     ${expiringSoon.length > 0 ? `
     <div class="card" style="background:#fff3cd; border-left:4px solid #ffc107; margin-bottom:1rem">
@@ -89,11 +74,23 @@ export async function render(el) {
     </div>
 
     ${isPharmacist ? `
+    <!-- Proveedores Activos (NUEVA SECCIÓN VISIBLE) -->
+    <div class="card" style="margin-top:1rem">
+      <h3>Proveedores Activos</h3>
+      <p class="muted">Total: ${suppliers.length} proveedor(es)</p>
+      ${suppliers.length > 0 ? tbl(['Nombre', 'Contacto', 'Teléfono', 'Email', 'NIT'], suppliers.map(s => [
+        esc(s.name),
+        esc(s.contact_name || '-'),
+        esc(s.phone || '-'),
+        esc(s.email || '-'),
+        esc(s.tax_id || '-')
+      ])) : '<p class="muted">No hay proveedores activos. Usa "Gestionar Proveedores" para agregar uno.</p>'}
+    </div>
+
     <!-- Órdenes de Compra -->
     <div class="card" style="margin-top:1rem">
       <h3>Órdenes de Compra</h3>
-      <p class="muted">Proveedores disponibles: ${suppliers.length}</p>
-      ${tbl(['Número', 'Proveedor', 'Fecha', 'Total', 'Estado', 'Acción'], orders.map(o => [
+      ${orders.length > 0 ? tbl(['Número', 'Proveedor', 'Fecha', 'Total', 'Estado', 'Acción'], orders.map(o => [
         esc(o.order_number),
         esc(o.suppliers?.name || 'N/A'),
         esc(fmtDT(o.created_at)),
@@ -103,40 +100,95 @@ export async function render(el) {
           <button class="btn sm" data-receive="${o.id}">Recibir</button>
           <button class="btn sm bad" data-cancel-order="${o.id}">Cancelar</button>
         ` : '<span class="muted">-</span>'
-      ]))}
+      ])) : '<p class="muted">No hay órdenes de compra registradas.</p>'}
     </div>
 
     <!-- Gestión de Lotes -->
     <div class="card" style="margin-top:1rem">
       <h3>Lotes de Productos</h3>
       <button class="btn sm" id="btn-new-batch" style="margin-bottom:0.5rem">+ Nuevo Lote Manual</button>
-      ${tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante'], batches.map(b => [
+      ${batches.length > 0 ? tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante'], batches.map(b => [
         esc(b.products?.name || 'N/A'),
         esc(b.batch_number),
         fmtD(b.expiration_date),
         esc(b.quantity),
         `<strong>${esc(b.remaining_quantity)}</strong>`
-      ]))}
+      ])) : '<p class="muted">No hay lotes registrados.</p>'}
     </div>
 
     <!-- Movimientos de Inventario -->
     <div class="card" style="margin-top:1rem">
       <h3>Movimientos de Inventario (Trazabilidad)</h3>
-      ${tbl(['Fecha', 'Producto', 'Tipo', 'Cantidad', 'Razón', 'Usuario'], movements.map(m => [
+      ${movements.length > 0 ? tbl(['Fecha', 'Producto', 'Tipo', 'Cantidad', 'Razón', 'Usuario'], movements.map(m => [
         esc(fmtDT(m.performed_at)),
         esc(m.products?.name || 'N/A'),
         `<span class="badge ${m.movement_type === 'entrada' ? 'confirmada' : 'cancelada'}">${esc(m.movement_type)}</span>`,
         esc(m.quantity),
         esc(m.reason),
-        esc(m.profiles?.full_name || 'Sistema')
-      ]))}
+        esc(userNames[m.performed_by] || 'Sistema')
+      ])) : '<p class="muted">No hay movimientos registrados.</p>'}
     </div>
     ` : ''}
   `;
 
-  // Event listeners (mantén el resto del código igual)
+  // Event listeners
   el.addEventListener('click', async (e) => {
-    // ... (el resto de event listeners que ya tienes)
+    const dispenseBtn = e.target.closest('[data-dispense]');
+    if (dispenseBtn) {
+      const id = dispenseBtn.dataset.dispense;
+      if (!confirm('¿Confirmar dispensación de esta receta?')) return;
+      
+      const { error } = await sb.rpc('dispense_prescription', { p_id: id });
+      if (error) fail(error);
+      else {
+        toast('Receta dispensada exitosamente');
+        render(el);
+      }
+      return;
+    }
+
+    if (e.target.id === 'btn-new-batch') {
+      openBatchModal(products || [], render.bind(null, el));
+      return;
+    }
+
+    if (e.target.id === 'btn-new-order') {
+      openOrderModal(products || [], suppliers, render.bind(null, el));
+      return;
+    }
+
+    if (e.target.id === 'btn-manage-suppliers') {
+      openSuppliersModal(suppliers, render.bind(null, el));
+      return;
+    }
+
+    const receiveBtn = e.target.closest('[data-receive]');
+    if (receiveBtn) {
+      const id = receiveBtn.dataset.receive;
+      if (!confirm('¿Confirmar recepción de esta orden? Se actualizará el inventario automáticamente.')) return;
+      
+      const { error } = await sb.rpc('receive_purchase_order', { p_order_id: id });
+      if (error) fail(error);
+      else {
+        toast('Orden recibida e inventario actualizado');
+        render(el);
+      }
+      return;
+    }
+
+    const cancelBtn = e.target.closest('[data-cancel-order]');
+    if (cancelBtn) {
+      const id = cancelBtn.dataset.cancelOrder;
+      if (!confirm('¿Cancelar esta orden de compra?')) return;
+      
+      const { error } = await sb.from('purchase_orders').update({ status: 'cancelada' }).eq('id', id);
+      if (error) fail(error);
+      else {
+        toast('Orden cancelada');
+        render(el);
+      }
+      return;
+    }
   });
 }
 
@@ -186,11 +238,9 @@ function openBatchModal(products, onClose) {
     if (error) {
       fail(error);
     } else {
-      // Actualizar stock total del producto
       const { data: product } = await sb.from('products').select('stock').eq('id', payload.product_id).single();
       await sb.from('products').update({ stock: (product?.stock || 0) + payload.quantity }).eq('id', payload.product_id);
       
-      // Registrar movimiento
       await sb.from('inventory_movements').insert({
         product_id: payload.product_id,
         movement_type: 'entrada',
@@ -206,6 +256,11 @@ function openBatchModal(products, onClose) {
 }
 
 function openOrderModal(products, suppliers, onClose) {
+  if (suppliers.length === 0) {
+    toast('Primero debes crear al menos un proveedor.', true);
+    return;
+  }
+
   const { el, close } = openModal('Nueva Orden de Compra', `
     <form id="order-form" style="display:grid; gap:0.75rem;">
       <div>
@@ -346,7 +401,7 @@ function openSuppliersModal(suppliers, onClose) {
           esc(s.contact_name || '-'),
           esc(s.phone || '-'),
           esc(s.email || '-'),
-          `<button class="btn sm bad" data-delete-supplier="${s.id}">Eliminar</button>`
+          `<button class="btn sm bad" data-delete-supplier="${s.id}">Desactivar</button>`
         ]))
       : '<p class="muted">No hay proveedores registrados.</p>';
   };
@@ -355,7 +410,7 @@ function openSuppliersModal(suppliers, onClose) {
     const { el: modalEl, close: closeModal } = openModal('Nuevo Proveedor', `
       <form id="supplier-form" style="display:grid; gap:0.75rem;">
         <div>
-          <label>Nombre</label>
+          <label>Nombre *</label>
           <input type="text" name="name" required style="width:100%">
         </div>
         <div>
@@ -387,14 +442,15 @@ function openSuppliersModal(suppliers, onClose) {
       const formData = new FormData(e.target);
       const payload = Object.fromEntries(formData);
 
-      const { error } = await sb.from('suppliers').insert(payload);
+      const { data, error } = await sb.from('suppliers').insert(payload).select().single();
       if (error) {
         fail(error);
       } else {
         toast('Proveedor creado exitosamente');
+        suppliers.push(data);
         closeModal();
-        suppliers.push({ ...payload, id: crypto.randomUUID(), is_active: true });
         paintSuppliers();
+        onClose();
       }
     };
   };
@@ -403,15 +459,17 @@ function openSuppliersModal(suppliers, onClose) {
     const deleteBtn = e.target.closest('[data-delete-supplier]');
     if (deleteBtn) {
       const id = deleteBtn.dataset.deleteSupplier;
-      if (!confirm('¿Eliminar este proveedor?')) return;
+      if (!confirm('¿Desactivar este proveedor? No se eliminará, solo dejará de aparecer como opción.')) return;
 
       const { error } = await sb.from('suppliers').update({ is_active: false }).eq('id', id);
       if (error) {
         fail(error);
       } else {
         toast('Proveedor desactivado');
-        suppliers = suppliers.filter(s => s.id !== id);
+        const idx = suppliers.findIndex(s => s.id === id);
+        if (idx >= 0) suppliers.splice(idx, 1);
         paintSuppliers();
+        onClose();
       }
     }
   });
