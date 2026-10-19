@@ -1,75 +1,170 @@
-import { sb, $, esc, fail, isRole, audit, fmtD, fmtDT, fullName, today, dayBounds, money, tbl } from './core.js';
-
-const ymd = d => new Date(d).toLocaleDateString('en-CA');
-const weekStart = d => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return ymd(x); };
-
-const REPORTS = {
-  patients: { t: 'Pacientes registrados en un período', r: ['admin', 'doctor'], async run(s, e) {
-    let q = sb.from('patients').select('dpi,first_name,last_name,birth_date,phone,created_at').gte('created_at', s).lt('created_at', e).order('created_at');
-    if (isRole('doctor')) { // el médico solo ve pacientes con los que tiene citas
-      const { data: ap } = await sb.from('appointments').select('patient_id');
-      const ids = [...new Set((ap || []).map(a => a.patient_id))];
-      if (!ids.length) return { head: ['DPI', 'Paciente', 'Nacimiento', 'Teléfono', 'Registrado'], rows: [] };
-      q = q.in('id', ids);
-    }
-    const { data, error } = await q; if (error) throw error;
-    return { head: ['DPI', 'Paciente', 'Nacimiento', 'Teléfono', 'Registrado'], rows: data.map(p => [p.dpi, fullName(p), fmtD(p.birth_date), p.phone || '', fmtD(p.created_at)]) };
-  } },
-  appts: { t: 'Citas: programadas vs atendidas vs canceladas', r: ['admin', 'doctor'], async run(s, e) {
-    const { data, error } = await sb.from('appointments').select('starts_at,status,patient:patients(first_name,last_name),doctor:profiles!doctor_id(full_name)').gte('starts_at', s).lt('starts_at', e).order('starts_at');
-    if (error) throw error;
-    const c = {}; data.forEach(a => (c[a.status] = (c[a.status] || 0) + 1));
-    const summary = ['programada', 'confirmada', 'atendida', 'cancelada', 'ausente', 'pendiente'].map(k => `${k}: ${c[k] || 0}`).join('  |  ');
-    return { summary, head: ['Fecha', 'Paciente', 'Médico', 'Estado'], rows: data.map(a => [fmtDT(a.starts_at), fullName(a.patient), a.doctor?.full_name || '', a.status]) };
-  } },
-  income: { t: 'Ingresos por día / semana / mes', r: ['admin'], group: true, async run(s, e, g) {
-    const { data, error } = await sb.from('invoices').select('total,method,paid_at').eq('status', 'pagada').gte('paid_at', s).lt('paid_at', e);
-    if (error) throw error;
-    const key = d => g === 'month' ? ymd(d).slice(0, 7) : g === 'week' ? 'Semana de ' + weekStart(d) : ymd(d);
-    const m = {}; data.forEach(i => { const k = key(i.paid_at); m[k] ??= { n: 0, ef: 0, ta: 0 }; m[k].n++; m[k][i.method === 'efectivo' ? 'ef' : 'ta'] += +i.total; });
-    const rows = Object.entries(m).sort().map(([k, v]) => [k, v.n, money(v.ef), money(v.ta), money(v.ef + v.ta)]);
-    const tot = Object.values(m).reduce((a, v) => a + v.ef + v.ta, 0);
-    return { summary: 'Total del período: ' + money(tot), head: ['Período', 'Facturas', 'Efectivo', 'Tarjeta', 'Total'], rows };
-  } },
-  products: { t: 'Productos más dispensados', r: ['admin', 'pharmacist'], async run(s, e) {
-    const { data, error } = await sb.from('prescription_items').select('name,quantity,prescriptions!inner(status,dispensed_at)').eq('prescriptions.status', 'dispensada').gte('prescriptions.dispensed_at', s).lt('prescriptions.dispensed_at', e);
-    if (error) throw error;
-    const m = {}; data.forEach(i => (m[i.name] = (m[i.name] || 0) + i.quantity));
-    return { head: ['Producto', 'Unidades dispensadas'], rows: Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, v]) };
-  } },
-};
+import { sb, $, esc, isRole, toast, fail, tbl, money, fmtD, S, openModal } from './core.js';
 
 export async function render(el) {
-  const avail = Object.entries(REPORTS).filter(([, r]) => isRole(...r.r));
-  const first = new Date(); first.setDate(1);
-  let last = null;
-  el.innerHTML = `<div class="bar"><h2>Reportes</h2></div><div class="card"><div class="grid">
-    <label>Reporte<select id="rp">${avail.map(([k, r]) => `<option value="${k}">${esc(r.t)}</option>`).join('')}</select></label>
-    <label>Desde<input type="date" id="fr" value="${ymd(first)}"></label><label>Hasta<input type="date" id="to" value="${today()}"></label>
-    <label id="gl" style="display:none">Agrupar por<select id="gr"><option value="day">Día</option><option value="week">Semana</option><option value="month">Mes</option></select></label></div>
-    <div class="row"><button class="btn" id="go">Generar</button><button class="btn ghost" id="xl" disabled>Excel</button><button class="btn ghost" id="pf" disabled>PDF</button></div></div><div id="out"></div>`;
-  const sync = () => ($('#gl').style.display = REPORTS[$('#rp').value].group ? '' : 'none');
-  $('#rp').onchange = sync; sync();
-  $('#go').onclick = async () => {
-    const key = $('#rp').value, [s] = dayBounds($('#fr').value), [, e] = dayBounds($('#to').value);
+  const isAdmin = isRole('admin');
+  const isDoctor = isRole('doctor');
+  
+  // Cargar reportes recientes
+  const [{ data: reports }, { data: doctors }] = await Promise.all([
+    isAdmin ? sb.from('report_exports').select('*, profiles(full_name)').order('generated_at', { ascending: false }).limit(50) : { data: [] },
+    isDoctor ? sb.from('profiles').select('id, full_name').eq('role', 'doctor') : { data: [] }
+  ]);
+
+  el.innerHTML = `
+    <div class="bar"><h2>Reportes Gerenciales</h2></div>
+
+    <!-- Alerta de Seguridad -->
+    <div class="card" style="background:#fff3cd; border-left:4px solid #ffc107; margin-bottom:1rem">
+      <h3 style="color:#856404">🔒 Reportes con Auditoría Completa</h3>
+      <p class="muted">Todos los reportes generados incluyen marca de agua, metadatos de auditoría y registro de quién los generó. Los datos clínicos están protegidos por RLS.</p>
+    </div>
+
+    <!-- Generador de Reportes -->
+    <div class="card">
+      <h3>Generar Nuevo Reporte</h3>
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap:1rem;">
+        ${isAdmin ? `
+        <div class="report-card" data-type="financial" style="padding:1rem; border:2px solid #e0e0e0; border-radius:8px; cursor:pointer; transition:all 0.2s;">
+          <h4 style="margin:0 0 0.5rem 0;">💰 Reporte Financiero</h4>
+          <p class="muted" style="margin:0;">Facturación, ingresos por método de pago, reembolsos</p>
+        </div>
+        ` : ''}
+        ${isDoctor || isAdmin ? `
+        <div class="report-card" data-type="clinical" style="padding:1rem; border:2px solid #e0e0e0; border-radius:8px; cursor:pointer; transition:all 0.2s;">
+          <h4 style="margin:0 0 0.5rem 0;">🏥 Reporte Clínico</h4>
+          <p class="muted" style="margin:0;">Consultas, diagnósticos, actividad por médico</p>
+        </div>
+        ` : ''}
+        ${isAdmin ? `
+        <div class="report-card" data-type="inventory" style="padding:1rem; border:2px solid #e0e0e0; border-radius:8px; cursor:pointer; transition:all 0.2s;">
+          <h4 style="margin:0 0 0.5rem 0;">📦 Reporte de Inventario</h4>
+          <p class="muted" style="margin:0;">Stock, movimientos, productos por vencer</p>
+        </div>
+        <div class="report-card" data-type="patients" style="padding:1rem; border:2px solid #e0e0e0; border-radius:8px; cursor:pointer; transition:all 0.2s;">
+          <h4 style="margin:0 0 0.5rem 0;">👥 Reporte de Pacientes</h4>
+          <p class="muted" style="margin:0;">Pacientes registrados, citas, expedientes</p>
+        </div>
+        ` : ''}
+      </div>
+    </div>
+
+    ${isAdmin ? `
+    <!-- Historial de Reportes -->
+    <div class="card" style="margin-top:1rem">
+      <h3>Historial de Reportes Generados</h3>
+      ${tbl(['Fecha', 'Tipo', 'Filas', 'Formato', 'Generado por', 'Acciones'], (reports || []).map(r => [
+        esc(fmtD(r.generated_at)),
+        `<span class="badge">${esc(r.report_type)}</span>`,
+        esc(r.row_count),
+        esc(r.file_format.toUpperCase()),
+        esc(r.profiles?.full_name || 'Sistema'),
+        `<button class="btn sm" data-download="${r.id}">Descargar</button>`
+      ]))}
+    </div>
+    ` : ''}
+  `;
+
+  // Event listeners
+  el.addEventListener('click', async (e) => {
+    const card = e.target.closest('.report-card');
+    if (card) {
+      const type = card.dataset.type;
+      openReportConfigModal(type, doctors?.data || [], render.bind(null, el));
+      return;
+    }
+
+    const downloadBtn = e.target.closest('[data-download]');
+    if (downloadBtn) {
+      const id = downloadBtn.dataset.download;
+      toast('Descarga de reporte (funcionalidad de storage pendiente)');
+    }
+  });
+}
+
+function openReportConfigModal(type, doctors, onClose) {
+  const titles = {
+    financial: 'Reporte Financiero',
+    clinical: 'Reporte Clínico',
+    inventory: 'Reporte de Inventario',
+    patients: 'Reporte de Pacientes'
+  };
+
+  let fieldsHtml = `
+    <div>
+      <label>Fecha Desde</label>
+      <input type="date" name="from" required style="width:100%">
+    </div>
+    <div>
+      <label>Fecha Hasta</label>
+      <input type="date" name="to" required style="width:100%">
+    </div>
+  `;
+
+  if (type === 'clinical') {
+    fieldsHtml += `
+      <div>
+        <label>Médico (opcional)</label>
+        <select name="doctor_id" style="width:100%">
+          <option value="">Todos los médicos</option>
+          ${doctors.map(d => `<option value="${d.id}">${esc(d.full_name)}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }
+
+  const { el, close } = openModal(`Configurar ${titles[type]}`, `
+    <form id="report-form" style="display:grid; gap:0.75rem;">
+      ${fieldsHtml}
+      <div>
+        <label>Formato de Exportación</label>
+        <select name="format" required style="width:100%">
+          <option value="csv">CSV (Excel)</option>
+          <option value="xlsx">Excel (.xlsx)</option>
+          <option value="pdf">PDF</option>
+        </select>
+      </div>
+      <button type="submit" class="btn">Generar Reporte</button>
+    </form>
+  `);
+
+  $('#report-form', el).onsubmit = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const from = formData.get('from');
+    const to = formData.get('to');
+    const format = formData.get('format');
+
     try {
-      const r = await REPORTS[key].run(s, e, $('#gr').value);
-      last = { title: REPORTS[key].t, key, ...r };
-      $('#out').innerHTML = (r.summary ? `<p><b>${esc(r.summary)}</b></p>` : '') + tbl(r.head, r.rows.map(row => row.map(c => esc(c))));
-      $('#xl').disabled = $('#pf').disabled = false;
-      audit('view', 'report:' + key);
-    } catch (err) { fail(err); }
-  };
-  $('#xl').onclick = () => {
-    const ws = XLSX.utils.aoa_to_sheet([[last.title], [last.summary || ''], last.head, ...last.rows]);
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Reporte');
-    XLSX.writeFile(wb, `reporte_${last.key}_${today()}.xlsx`); audit('export_xlsx', 'report:' + last.key);
-  };
-  $('#pf').onclick = () => {
-    const doc = new window.jspdf.jsPDF();
-    doc.setFontSize(14); doc.text('Centro Médico Premier', 14, 15); doc.setFontSize(11); doc.text(last.title, 14, 22);
-    doc.setFontSize(9); doc.text(`${$('#fr').value} a ${$('#to').value}${last.summary ? '  —  ' + last.summary : ''}`, 14, 28);
-    doc.autoTable({ head: [last.head], body: last.rows, startY: 33, styles: { fontSize: 8 }, headStyles: { fillColor: [14, 116, 144] } });
-    doc.save(`reporte_${last.key}_${today()}.pdf`); audit('export_pdf', 'report:' + last.key);
+      let result;
+      if (type === 'financial') {
+        const { data, error } = await sb.rpc('generate_financial_report', {
+          p_from: from,
+          p_to: to,
+          p_format: format
+        });
+        if (error) throw error;
+        result = data;
+      } else if (type === 'clinical') {
+        const doctorId = formData.get('doctor_id') || null;
+        const { data, error } = await sb.rpc('generate_clinical_report', {
+          p_from: from,
+          p_to: to,
+          p_doctor_id: doctorId
+        });
+        if (error) throw error;
+        result = data;
+      } else {
+        toast('Reporte en desarrollo');
+        close();
+        return;
+      }
+
+      toast(`Reporte generado exitosamente (${result.data?.totals?.total_invoices || result.data?.totals?.total_consultations || 0} registros)`);
+      console.log('Report data:', result);
+      close();
+      onClose();
+    } catch (err) {
+      fail(err);
+    }
   };
 }

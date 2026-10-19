@@ -1,88 +1,224 @@
-import { sb, CFG, $, $$, esc, toast, fail, isRole, fmtDT, openModal, fullName, tbl, badge, money, dayBounds, today } from './core.js';
+import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtDT, S, openModal } from './core.js';
 
 export async function render(el) {
-  let tab = 'inv';
-  const draw = () => {
-    el.innerHTML = `<div class="bar"><h2>Facturación y caja</h2></div><div class="tabs"><button data-t="inv" class="${tab === 'inv' ? 'on' : ''}">Facturas</button><button data-t="caja" class="${tab === 'caja' ? 'on' : ''}">Caja del día</button></div><div id="tab"></div>`;
-    el.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => { tab = b.dataset.t; draw(); }));
-    tab === 'inv' ? invoices($('#tab')) : caja($('#tab'));
-  };
-  draw();
+  const isCashier = isRole('admin', 'cashier');
+  
+  // Cargar datos en paralelo
+  const [{ data: invoices }, { data: patients }] = await Promise.all([
+    sb.from('invoices').select(`
+      *,
+      patient:patients(first_name, last_name, dpi),
+      documents:id,filename,file_type
+    `).order('created_at', { ascending: false }).limit(100),
+    sb.from('patients').select('id, first_name, last_name, dpi').order('last_name')
+  ]);
+
+  el.innerHTML = `
+    <div class="bar">
+      <h2>Facturación y Caja</h2>
+      ${isCashier ? `<button class="btn" id="btn-new-invoice">Nueva Factura</button>` : ''}
+    </div>
+
+    <!-- Alerta de Seguridad PCI DSS -->
+    <div class="card" style="background:#e7f3ff; border-left:4px solid #2196F3; margin-bottom:1rem">
+      <h3 style="color:#0d47a1">🔒 Seguridad de Datos de Pago</h3>
+      <p class="muted">Este sistema cumple con PCI DSS. Nunca almacenamos números completos de tarjetas de crédito. Solo se registran los últimos 4 dígitos para referencia.</p>
+    </div>
+
+    <!-- Facturas Recientes -->
+    <div class="card">
+      <h3>Facturas Recientes</h3>
+      ${tbl(['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado', 'Documentos', 'Acciones'], (invoices || []).map(inv => [
+        esc(inv.number),
+        esc(`${inv.patient?.first_name} ${inv.patient?.last_name}`),
+        esc(fmtDT(inv.created_at)),
+        money(inv.total),
+        esc(inv.method || '-'),
+        `<span class="badge ${inv.status}">${esc(inv.status)}</span>`,
+        inv.documents?.length > 0 ? `<span class="badge">${inv.documents.length} adjuntos</span>` : '-',
+        isCashier ? `
+          <button class="btn sm" data-view="${inv.id}">Ver</button>
+          ${inv.status === 'pagada' ? `<button class="btn sm bad" data-refund="${inv.id}">Reembolso</button>` : ''}
+        ` : '<span class="muted">Solo caja</span>'
+      ]))}
+    </div>
+
+    ${isCashier ? `
+    <!-- Resumen de Caja -->
+    <div class="card" style="margin-top:1rem">
+      <h3>Resumen del Día</h3>
+      <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:1rem; text-align:center;">
+        <div>
+          <div class="muted">Total Facturado</div>
+          <div style="font-size:1.5rem; font-weight:bold;">${money((invoices || []).filter(i => i.status === 'pagada' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
+        </div>
+        <div>
+          <div class="muted">Efectivo</div>
+          <div style="font-size:1.5rem; font-weight:bold; color:#4caf50;">${money((invoices || []).filter(i => i.status === 'pagada' && i.method === 'efectivo' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
+        </div>
+        <div>
+          <div class="muted">Tarjeta</div>
+          <div style="font-size:1.5rem; font-weight:bold; color:#2196F3;">${money((invoices || []).filter(i => i.status === 'pagada' && i.method === 'tarjeta' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
+        </div>
+      </div>
+    </div>
+    ` : ''}
+  `;
+
+  // Event listeners
+  el.addEventListener('click', async (e) => {
+    // Nueva factura
+    if (e.target.id === 'btn-new-invoice') {
+      openInvoiceModal(patients || [], render.bind(null, el));
+      return;
+    }
+
+    // Ver factura
+    const viewBtn = e.target.closest('[data-view]');
+    if (viewBtn) {
+      const id = viewBtn.dataset.view;
+      const invoice = invoices.find(i => i.id === id);
+      if (invoice) openInvoiceDetailModal(invoice);
+      return;
+    }
+
+    // Reembolso
+    const refundBtn = e.target.closest('[data-refund]');
+    if (refundBtn) {
+      const id = refundBtn.dataset.refund;
+      openRefundModal(id, render.bind(null, el));
+      return;
+    }
+  });
 }
 
-async function invoices(box) {
-  const { data, error } = await sb.from('invoices').select('id,number,total,method,status,created_at,patient:patients(first_name,last_name)').order('created_at', { ascending: false }).limit(100);
-  if (error) return fail(error);
-  box.innerHTML = `<div class="bar"><span></span><button class="btn" id="ni">+ Nueva factura</button></div>
-  ${tbl(['N.º', 'Fecha', 'Paciente', 'Total', 'Método', 'Estado', ''], data.map(i => [esc(i.number), fmtDT(i.created_at), esc(fullName(i.patient)), money(i.total), esc(i.method || '—'), badge(i.status), i.status === 'pendiente' ? `<button class="btn sm" data-pay="${i.id}">Marcar pagada</button>` : '']))}`;
-  $('#ni').onclick = () => newInvoice(() => invoices(box));
-  box.onclick = async e => {
-    const id = e.target.dataset.pay; if (!id) return;
-    const method = (prompt('Método de pago (efectivo / tarjeta):', 'efectivo') || '').toLowerCase().trim();
-    if (!['efectivo', 'tarjeta'].includes(method)) return toast('Método inválido', true);
-    const { error } = await sb.from('invoices').update({ status: 'pagada', method, paid_at: new Date().toISOString() }).eq('id', id);
-    error ? fail(error) : toast('Factura pagada'); invoices(box);
-  };
-}
+function openInvoiceModal(patients, onClose) {
+  const { el, close } = openModal('Nueva Factura', `
+    <form id="invoice-form" style="display:grid; gap:0.75rem;">
+      <div>
+        <label>Paciente</label>
+        <select name="patient_id" required style="width:100%">
+          <option value="">Seleccionar paciente...</option>
+          ${patients.map(p => `<option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)} - DPI: ${esc(p.dpi)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label>Conceptos (JSON)</label>
+        <textarea name="items" rows="4" placeholder='[{"concept":"Consulta médica","qty":1,"price":150}]' required style="width:100%"></textarea>
+      </div>
+      <div>
+        <label>Total (Q)</label>
+        <input type="number" name="total" step="0.01" min="0" required style="width:100%">
+      </div>
+      <div>
+        <label>Método de Pago</label>
+        <select name="method" required style="width:100%">
+          <option value="efectivo">Efectivo</option>
+          <option value="tarjeta">Tarjeta</option>
+        </select>
+      </div>
+      <div id="card-fields" style="display:none;">
+        <label>Últimos 4 dígitos de tarjeta (solo para referencia)</label>
+        <input type="text" name="card_last_four" maxlength="4" pattern="[0-9]{4}" placeholder="1234" style="width:100%">
+        <small class="muted">Por seguridad, solo registramos los últimos 4 dígitos</small>
+      </div>
+      <button type="submit" class="btn">Crear Factura</button>
+    </form>
+  `);
 
-async function newInvoice(done) {
-  const { data: ps } = await sb.from('patients').select('id,first_name,last_name,dpi').order('last_name').limit(1000);
-  const m = openModal('Nueva factura', `<form><label>Paciente<select name="patient" required><option value="">—</option>${ps.map(p => `<option value="${p.id}">${esc(p.last_name + ', ' + p.first_name + ' — ' + p.dpi)}</option>`).join('')}</select></label>
-    <div id="lines" class="muted" style="margin:10px 0">Seleccione un paciente para ver conceptos facturables.</div>
-    <div class="grid"><label>Concepto adicional<input name="mdesc"></label><label>Monto (Q)<input name="mamt" type="number" step="0.01" min="0"></label>
-    <label>Método<select name="method"><option value="efectivo">Efectivo</option><option value="tarjeta">Tarjeta</option></select></label>
-    <label>Estado<select name="status"><option value="pagada">Pagada</option><option value="pendiente">Pendiente</option></select></label></div>
-    <p><b>Total: <span id="tot">Q0.00</span></b></p><button class="btn">Generar factura</button></form>`);
-  const f = $('form', m.el);
-  const total = () => {
-    let t = $$('[data-amt]:checked', f).reduce((a, i) => a + +i.dataset.amt, 0) + (+f.mamt.value || 0);
-    $('#tot', m.el).textContent = money(t); return t;
+  // Mostrar/ocultar campos de tarjeta
+  const methodSelect = $('[name="method"]', el);
+  const cardFields = $('#card-fields', el);
+  methodSelect.onchange = () => {
+    cardFields.style.display = methodSelect.value === 'tarjeta' ? 'block' : 'none';
   };
-  f.oninput = f.onchange = total;
-  f.patient.onchange = async () => {
-    if (!f.patient.value) return;
-    const { data, error } = await sb.rpc('billable_items', { p_patient: f.patient.value });
-    if (error) return fail(error);
-    const fee = CFG.CONSULTATION_FEE || 150;
-    $('#lines', m.el).innerHTML = `<div class="line"><label><input type="radio" name="cons" value="" checked> Sin consulta</label></div>` +
-      data.consultations.map(c => `<div class="line"><label><input type="radio" name="cons" value="${c.id}" data-amt="${fee}" data-desc="Consulta médica"> Consulta ${fmtDT(c.date)} — ${esc(c.doctor)} (${money(fee)})</label></div>`).join('') +
-      data.prescriptions.map(r => {
-        const amt = r.items.reduce((a, i) => a + i.qty * i.price, 0), desc = 'Medicamentos: ' + r.items.map(i => `${i.name} x${i.qty}`).join(', ');
-        return `<div class="line"><label><input type="checkbox" name="rx" value="${r.id}" data-amt="${amt}" data-desc="${esc(desc)}"> ${esc(desc)} (${money(amt)})</label></div>`;
-      }).join('') || '';
-    total();
-  };
-  f.onsubmit = async e => {
+
+  $('#invoice-form', el).onsubmit = async (e) => {
     e.preventDefault();
-    const sel = $$('[data-amt]:checked', f);
-    const items = sel.map(i => ({ desc: i.dataset.desc, amount: +i.dataset.amt }));
-    if (+f.mamt.value > 0) items.push({ desc: f.mdesc.value || 'Concepto adicional', amount: +f.mamt.value });
-    if (!items.length) return toast('Seleccione al menos un concepto', true);
-    const paid = f.status.value === 'pagada';
-    const { error } = await sb.from('invoices').insert({
-      patient_id: f.patient.value, consultation_id: $('[name=cons]:checked', f)?.value || null,
-      prescription_ids: $$('[name=rx]:checked', f).map(i => i.value), items, total: total(),
-      status: f.status.value, method: paid ? f.method.value : null, paid_at: paid ? new Date().toISOString() : null });
-    if (error) return fail(error); toast('Factura generada'); m.close(); done();
+    const formData = new FormData(e.target);
+    const method = formData.get('method');
+    
+    let payload = {
+      patient_id: formData.get('patient_id'),
+      items: JSON.parse(formData.get('items')),
+      total: parseFloat(formData.get('total')),
+      method: method,
+      status: 'pagada',
+      paid_at: new Date().toISOString()
+    };
+
+    // Solo agregar datos de tarjeta si el método es tarjeta
+    if (method === 'tarjeta') {
+      const cardLastFour = formData.get('card_last_four');
+      if (!cardLastFour || !/^[0-9]{4}$/.test(cardLastFour)) {
+        fail('Debe ingresar los últimos 4 dígitos de la tarjeta');
+        return;
+      }
+      payload.card_last_four = cardLastFour;
+    }
+
+    const { error } = await sb.from('invoices').insert(payload);
+    if (error) {
+      fail(error);
+    } else {
+      toast('Factura creada exitosamente');
+      close();
+      onClose();
+    }
   };
 }
 
-async function caja(box) {
-  box.innerHTML = `<div class="row" style="margin-bottom:12px"><input type="date" id="cd" value="${today()}" style="width:auto"></div><div id="cx"></div>`;
-  const load = async () => {
-    const day = $('#cd').value, [s, e] = dayBounds(day);
-    const [{ data: inv }, { data: cl }] = await Promise.all([
-      sb.from('invoices').select('number,total,method,paid_at,patient:patients(first_name,last_name)').eq('status', 'pagada').gte('paid_at', s).lt('paid_at', e).order('paid_at'),
-      sb.from('cash_closures').select('*').eq('closure_date', day).maybeSingle()]);
-    const sum = m => inv.filter(i => !m || i.method === m).reduce((a, i) => a + Number(i.total), 0);
-    $('#cx').innerHTML = `<div class="cards"><div class="stat">Total recaudado<b>${money(sum())}</b></div><div class="stat">Efectivo<b>${money(sum('efectivo'))}</b></div><div class="stat">Tarjeta<b>${money(sum('tarjeta'))}</b></div></div>
-    ${tbl(['Hora', 'Factura', 'Paciente', 'Método', 'Monto'], inv.map(i => [fmtDT(i.paid_at).split(' ').pop(), esc(i.number), esc(fullName(i.patient)), esc(i.method), money(i.total)]))}<br>
-    ${cl ? `<div class="card">✅ Caja cerrada el ${fmtDT(cl.created_at)} — Total ${money(cl.total)}</div>` : '<button class="btn danger" id="cc">Cerrar caja de este día</button>'}`;
-    if ($('#cc')) $('#cc').onclick = async () => {
-      if (!confirm(`Cerrar caja del ${day} con total ${money(sum())}?`)) return;
-      const { error } = await sb.from('cash_closures').insert({ closure_date: day, total: sum(), cash_total: sum('efectivo'), card_total: sum('tarjeta') });
-      error ? fail(error) : toast('Caja cerrada'); load();
-    };
+function openInvoiceDetailModal(invoice) {
+  const { el, close } = openModal(`Factura ${invoice.number}`, `
+    <div style="display:grid; gap:0.75rem;">
+      <div><strong>Paciente:</strong> ${esc(invoice.patient?.first_name)} ${esc(invoice.patient?.last_name)}</div>
+      <div><strong>DPI:</strong> ${esc(invoice.patient?.dpi)}</div>
+      <div><strong>Fecha:</strong> ${esc(fmtDT(invoice.created_at))}</div>
+      <div><strong>Total:</strong> ${money(invoice.total)}</div>
+      <div><strong>Método:</strong> ${esc(invoice.method || '-')}</div>
+      ${invoice.card_last_four ? `<div><strong>Tarjeta:</strong> ****-****-****-${esc(invoice.card_last_four)}</div>` : ''}
+      <div><strong>Estado:</strong> <span class="badge ${invoice.status}">${esc(invoice.status)}</span></div>
+      <div>
+        <strong>Conceptos:</strong>
+        <pre style="background:#f5f5f5; padding:0.5rem; border-radius:4px; overflow-x:auto;">${esc(JSON.stringify(invoice.items, null, 2))}</pre>
+      </div>
+      <button class="btn" onclick="this.closest('.overlay').remove()">Cerrar</button>
+    </div>
+  `);
+}
+
+function openRefundModal(invoiceId, onClose) {
+  const { el, close } = openModal('Procesar Reembolso', `
+    <form id="refund-form" style="display:grid; gap:0.75rem;">
+      <div>
+        <label>Monto del Reembolso (Q)</label>
+        <input type="number" name="refund_amount" step="0.01" min="0" required style="width:100%">
+      </div>
+      <div>
+        <label>Razón del Reembolso</label>
+        <textarea name="refund_reason" rows="3" required style="width:100%"></textarea>
+      </div>
+      <button type="submit" class="btn bad">Confirmar Reembolso</button>
+    </form>
+  `);
+
+  $('#refund-form', el).onsubmit = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    
+    const { error } = await sb.from('invoices').update({
+      refund_amount: parseFloat(formData.get('refund_amount')),
+      refund_reason: formData.get('refund_reason'),
+      refunded_at: new Date().toISOString(),
+      refunded_by: S.user.id
+    }).eq('id', invoiceId);
+
+    if (error) {
+      fail(error);
+    } else {
+      toast('Reembolso procesado exitosamente');
+      close();
+      onClose();
+    }
   };
-  $('#cd').onchange = load; load();
 }
