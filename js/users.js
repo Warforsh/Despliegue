@@ -21,21 +21,21 @@ export async function render(el) {
     <div class="bar"><h2>Usuarios y Auditoría</h2></div>
     
     <!-- Sección 1: Invitar Personal -->
-    <div class="card" style="margin-bottom:1rem">
+    <div class="card">
       <h3>Invitar nuevo personal</h3>
       <p class="muted">El usuario deberá registrarse con este correo. El sistema le asignará automáticamente el rol de personal.</p>
-      <form id="invite-form" style="display:grid; grid-template-columns: 2fr 2fr 1fr auto; gap:0.5rem; align-items:end;">
+      <form id="invite-form" class="invite-form">
         <div>
           <label>Correo electrónico</label>
-          <input type="email" name="email" required placeholder="ejemplo@clinica.com" style="width:100%">
+          <input type="email" name="email" required placeholder="ejemplo@clinica.com">
         </div>
         <div>
           <label>Nombre completo</label>
-          <input type="text" name="full_name" required placeholder="Dr. Juan Pérez" style="width:100%">
+          <input type="text" name="full_name" required placeholder="Dr. Juan Pérez">
         </div>
         <div>
           <label>Rol</label>
-          <select name="role" required style="width:100%">
+          <select name="role" required>
             ${STAFF_ROLES.map(r => `<option value="${r}">${r}</option>`).join('')}
           </select>
         </div>
@@ -45,14 +45,14 @@ export async function render(el) {
 
     <!-- Sección 2: Invitaciones Pendientes -->
     ${invites && invites.length > 0 ? `
-    <div class="card" style="margin-bottom:1rem">
+    <div class="card">
       <h3>Invitaciones pendientes</h3>
       ${tbl(['Correo', 'Nombre', 'Rol', 'Fecha', 'Acción'], invites.map(inv => [
         esc(inv.email),
         esc(inv.full_name),
         `<span class="badge">${esc(inv.role)}</span>`,
         esc(new Date(inv.created_at).toLocaleDateString('es-GT')),
-        `<button class="btn sm bad" data-cancel-invite="${inv.id}">Cancelar</button>`
+        `<button class="btn sm danger" data-cancel-invite="${inv.id}">Cancelar</button>`
       ]))}
     </div>` : ''}
 
@@ -71,7 +71,7 @@ export async function render(el) {
     </div>
 
     <!-- Sección 4: Auditoría Reciente -->
-    <div class="card" style="margin-top:1rem">
+    <div class="card">
       <h3>Auditoría reciente</h3>
       ${(logs || []).length ? `<div class="audit-list">${(logs || []).map(l => {
         const userName = users?.find(u => u.id === l.user_id)?.full_name || 'Sistema';

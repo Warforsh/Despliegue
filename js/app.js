@@ -1,5 +1,6 @@
 import { sb, S, $, esc, isRole } from './core.js';
 import { authView } from './login.js';
+import { ico } from './icons.js';
 
 // Enlace de recuperación de contraseña (Supabase añade #...type=recovery)
 let RECOVERY = /type=recovery/.test(location.hash);
@@ -17,6 +18,8 @@ const ROUTES = {
   consultation: { hide: 1, r: ['admin', 'doctor', 'patient'], m: './consultation.js' },
 };
 const LABELS = { admin: 'Administrador', doctor: 'Médico', nurse: 'Enfermería', patient: 'Paciente', pharmacist: 'Farmacéutico', cashier: 'Cajero' };
+const ICONS = { dashboard: 'grid', patients: 'users', me: 'user', appointments: 'calendar', pharmacy: 'pill', billing: 'receipt', reports: 'chart', users: 'shield' };
+const initials = s => (String(s || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('') || '?').toUpperCase();
 
 async function boot() {
   if (!window.APP_CONFIG?.SUPABASE_URL) {
@@ -34,11 +37,31 @@ async function boot() {
   route();
 }
 
+// Menú lateral en móvil (panel deslizable)
+function setNav(open) {
+  $('#side')?.classList.toggle('open', open);
+  $('#scrim')?.classList.toggle('show', open);
+  $('#burger')?.setAttribute('aria-expanded', String(open));
+}
+
 function shell() {
+  const who = S.profile.full_name || S.profile.email;
   const nav = Object.entries(ROUTES).filter(([, v]) => !v.hide && v.r.includes(S.profile.role))
-    .map(([k, v]) => `<a href="#/${k}" data-r="${k}">${v.t}</a>`).join('');
-  $('#app').innerHTML = `<div class="layout"><nav class="side"><h1>🏥 Centro Médico Premier</h1>${nav}
-    <div class="me">${esc(S.profile.full_name || S.profile.email)}<br>${LABELS[S.profile.role]}<br><a href="#" id="out">Cerrar sesión</a></div></nav><main id="view"></main></div>`;
+    .map(([k, v]) => `<a href="#/${k}" data-r="${k}">${ico(ICONS[k] || 'file')}<span>${v.t}</span></a>`).join('');
+  $('#app').innerHTML = `<div class="layout">
+    <header class="topbar"><button class="burger" id="burger" type="button" aria-label="Abrir menú" aria-expanded="false" aria-controls="side">${ico('menu', 22)}</button><span class="tb-title">Centro Médico Premier</span></header>
+    <div class="scrim" id="scrim"></div>
+    <nav class="side" id="side" aria-label="Principal">
+      <div class="brand"><i class="brand-ic">${ico('cross', 22)}</i><span>Centro Médico Premier</span></div>
+      <div class="nav">${nav}</div>
+      <div class="me">
+        <div class="who"><span class="av">${esc(initials(who))}</span><div><b>${esc(who)}</b><small>${esc(LABELS[S.profile.role] || '')}</small></div></div>
+        <a href="#" id="out">${ico('logout', 18)}<span>Cerrar sesión</span></a>
+      </div>
+    </nav>
+    <main id="view"></main></div>`;
+  $('#burger').onclick = () => setNav(!$('#side').classList.contains('open'));
+  $('#scrim').onclick = () => setNav(false);
   $('#out').onclick = async e => { e.preventDefault(); await sb.auth.signOut(); location.hash = ''; boot(); };
 }
 
@@ -49,11 +72,13 @@ async function route() {
   const el = $('#view');
   if (!r || !r.r.includes(S.profile.role)) { el.innerHTML = '<p class="err">Sección no disponible para su rol.</p>'; return; }
   document.querySelectorAll('.side a[data-r]').forEach(a => a.classList.toggle('on', a.dataset.r === name));
+  setNav(false);
   el.innerHTML = '<p class="muted">Cargando…</p>';
   try { (await import(r.m)).render(el, param, name); } catch (e) { console.error(e); el.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
 window.addEventListener('hashchange', route);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') setNav(false); });
 sb.auth.onAuthStateChange(ev => {
   if (ev === 'SIGNED_OUT') { S.user = S.profile = null; }
   if (ev === 'PASSWORD_RECOVERY') authView(boot, 'recovery');
