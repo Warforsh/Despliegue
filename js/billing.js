@@ -7,8 +7,7 @@ export async function render(el) {
   const [{ data: invoices }, { data: patients }] = await Promise.all([
     sb.from('invoices').select(`
       *,
-      patient:patients(first_name, last_name, dpi),
-      documents:id,filename,file_type
+      patient:patients(first_name, last_name, dpi)
     `).order('created_at', { ascending: false }).limit(100),
     sb.from('patients').select('id, first_name, last_name, dpi').order('last_name')
   ]);
@@ -28,14 +27,13 @@ export async function render(el) {
     <!-- Facturas Recientes -->
     <div class="card">
       <h3>Facturas Recientes</h3>
-      ${tbl(['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado', 'Documentos', 'Acciones'], (invoices || []).map(inv => [
+      ${tbl(['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado', 'Acciones'], (invoices || []).map(inv => [
         esc(inv.number),
-        esc(`${inv.patient?.first_name} ${inv.patient?.last_name}`),
+        esc(`${inv.patient?.first_name || ''} ${inv.patient?.last_name || ''}`),
         esc(fmtDT(inv.created_at)),
         money(inv.total),
         esc(inv.method || '-'),
         `<span class="badge ${inv.status}">${esc(inv.status)}</span>`,
-        inv.documents?.length > 0 ? `<span class="badge">${inv.documents.length} adjuntos</span>` : '-',
         isCashier ? `
           <button class="btn sm" data-view="${inv.id}">Ver</button>
           ${inv.status === 'pagada' ? `<button class="btn sm bad" data-refund="${inv.id}">Reembolso</button>` : ''}
@@ -78,7 +76,24 @@ export async function render(el) {
     if (viewBtn) {
       const id = viewBtn.dataset.view;
       const invoice = invoices.find(i => i.id === id);
-      if (invoice) openInvoiceDetailModal(invoice);
+      if (invoice) {
+        // Cargar datos completos de la factura
+        const { data: fullInvoice, error } = await sb
+          .from('invoices')
+          .select(`
+            *,
+            patient:patients(first_name, last_name, dpi, phone, email)
+          `)
+          .eq('id', id)
+          .single();
+
+        if (error) {
+          fail(error);
+          return;
+        }
+
+        openInvoiceDetailModal(fullInvoice);
+      }
       return;
     }
 
@@ -141,17 +156,16 @@ function openInvoiceModal(patients, onClose) {
   `);
 
   // --- Estado interno ---
-  let lines = []; // [{concept, qty, price}]
-  let billableData = null; // Respuesta de billable_items()
-  let consultationIds = []; // IDs de consultas a facturar
-  let prescriptionIds = []; // IDs de recetas a facturar
+  let lines = [];
+  let billableData = null;
+  let consultationIds = [];
+  let prescriptionIds = [];
 
   const linesContainer = $('#lines-container', el);
   const totalSpan = $('#invoice-total', el);
   const billableSection = $('#billable-section', el);
   const billableList = $('#billable-list', el);
 
-  // --- Renderizar líneas ---
   function renderLines() {
     if (lines.length === 0) {
       linesContainer.innerHTML = '<p class="muted">Sin conceptos. Agregue una línea o cargue pendientes.</p>';
@@ -173,16 +187,12 @@ function openInvoiceModal(patients, onClose) {
     totalSpan.textContent = 'Q' + total.toFixed(2);
   }
 
-  // --- Eventos ---
-  
-  // Mostrar sección de facturables al elegir paciente
   $('[name="patient_id"]', el).onchange = (e) => {
     billableSection.style.display = e.target.value ? 'block' : 'none';
     billableList.innerHTML = '<span class="muted">Presione "Cargar pendientes"</span>';
     billableData = null;
   };
 
-  // Cargar conceptos pendientes usando la RPC billable_items
   $('#btn-load-billable', el).onclick = async () => {
     const patientId = $('[name="patient_id"]', el).value;
     if (!patientId) return;
@@ -234,7 +244,6 @@ function openInvoiceModal(patients, onClose) {
     html += '</div>';
     billableList.innerHTML = html;
 
-    // Evento para agregar seleccionados
     $('#btn-add-selected', el).onclick = () => {
       const selectedConsultations = $$('input[data-type="consultation"]:checked', el);
       const selectedPrescriptions = $$('input[data-type="prescription"]:checked', el);
@@ -267,13 +276,11 @@ function openInvoiceModal(patients, onClose) {
     };
   };
 
-  // Agregar línea manual
   $('#btn-add-line', el).onclick = () => {
     lines.push({ concept: '', qty: 1, price: 0 });
     renderLines();
   };
 
-  // Editar/remover líneas (delegación)
   linesContainer.addEventListener('input', (e) => {
     const idx = e.target.dataset.idx;
     const field = e.target.dataset.field;
@@ -290,12 +297,10 @@ function openInvoiceModal(patients, onClose) {
     }
   });
 
-  // Mostrar/ocultar campos de tarjeta
   $('[name="method"]', el).onchange = (e) => {
     $('#card-fields', el).style.display = e.target.value === 'tarjeta' ? 'block' : 'none';
   };
 
-  // Submit
   $('#invoice-form', el).onsubmit = async (e) => {
     e.preventDefault();
     
@@ -310,7 +315,7 @@ function openInvoiceModal(patients, onClose) {
 
     let payload = {
       patient_id: formData.get('patient_id'),
-      consultation_id: consultationIds[0] || null, // Solo una consulta por factura (según schema)
+      consultation_id: consultationIds[0] || null,
       prescription_ids: prescriptionIds,
       items: lines.map(l => ({ concept: l.concept, qty: l.qty, price: l.price, subtotal: l.qty * l.price })),
       total: total,
@@ -338,56 +343,100 @@ function openInvoiceModal(patients, onClose) {
     }
   };
 
-  // Render inicial
   renderLines();
 }
 
 function openInvoiceDetailModal(invoice) {
+  const items = invoice.items || [];
+  
   const { el, close } = openModal(`Factura ${invoice.number}`, `
-    <div style="display:grid; gap:0.75rem;">
-      <div><strong>Paciente:</strong> ${esc(invoice.patient?.first_name)} ${esc(invoice.patient?.last_name)}</div>
-      <div><strong>DPI:</strong> ${esc(invoice.patient?.dpi)}</div>
-      <div><strong>Fecha:</strong> ${esc(fmtDT(invoice.created_at))}</div>
-      <div><strong>Total:</strong> ${money(invoice.total)}</div>
-      <div><strong>Método:</strong> ${esc(invoice.method || '-')}</div>
-      ${invoice.card_last_four ? `<div><strong>Tarjeta:</strong> ****-****-****-${esc(invoice.card_last_four)}</div>` : ''}
-      <div><strong>Estado:</strong> <span class="badge ${invoice.status}">${esc(invoice.status)}</span></div>
-      ${invoice.refund_amount > 0 ? `
-        <div style="background:#ffebee; padding:0.5rem; border-radius:4px; border-left:4px solid #f44336;">
-          <strong>Reembolso:</strong> ${money(invoice.refund_amount)}<br>
-          <strong>Razón:</strong> ${esc(invoice.refund_reason || '-')}<br>
-          <strong>Fecha:</strong> ${esc(fmtDT(invoice.refunded_at))}
+    <div style="display:grid; gap:0.75rem; max-height:80vh; overflow-y:auto;">
+      <div style="background:#f5f5f5; padding:1rem; border-radius:8px;">
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
+          <div>
+            <div class="muted" style="font-size:0.85rem;">Número de Factura</div>
+            <div style="font-size:1.2rem; font-weight:bold;">${esc(invoice.number)}</div>
+          </div>
+          <div>
+            <div class="muted" style="font-size:0.85rem;">Fecha de Emisión</div>
+            <div>${esc(fmtDT(invoice.created_at))}</div>
+          </div>
         </div>
-      ` : ''}
+      </div>
+
       <div>
-        <strong>Conceptos:</strong>
-        <table style="width:100%; border-collapse:collapse; margin-top:0.5rem;">
+        <h4 style="margin:0 0 0.5rem 0;">Datos del Paciente</h4>
+        <div style="background:#e7f3ff; padding:0.75rem; border-radius:4px;">
+          <div><strong>Nombre:</strong> ${esc(invoice.patient?.first_name || '')} ${esc(invoice.patient?.last_name || '')}</div>
+          <div><strong>DPI:</strong> ${esc(invoice.patient?.dpi || '-')}</div>
+          ${invoice.patient?.phone ? `<div><strong>Teléfono:</strong> ${esc(invoice.patient.phone)}</div>` : ''}
+          ${invoice.patient?.email ? `<div><strong>Email:</strong> ${esc(invoice.patient.email)}</div>` : ''}
+        </div>
+      </div>
+
+      <div>
+        <h4 style="margin:0 0 0.5rem 0;">Detalle de la Factura</h4>
+        <table style="width:100%; border-collapse:collapse;">
           <thead>
-            <tr style="background:#f5f5f5;">
+            <tr style="background:#f5f5f5; border-bottom:2px solid #ddd;">
               <th style="text-align:left; padding:0.5rem;">Concepto</th>
-              <th style="text-align:right; padding:0.5rem;">Cant.</th>
-              <th style="text-align:right; padding:0.5rem;">Precio</th>
+              <th style="text-align:center; padding:0.5rem;">Cant.</th>
+              <th style="text-align:right; padding:0.5rem;">Precio Unit.</th>
               <th style="text-align:right; padding:0.5rem;">Subtotal</th>
             </tr>
           </thead>
           <tbody>
-            ${(invoice.items || []).map(it => `
-              <tr>
-                <td style="padding:0.5rem; border-top:1px solid #e0e0e0;">${esc(it.concept || it.name || '-')}</td>
-                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${esc(it.qty || 1)}</td>
-                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${money(it.price)}</td>
-                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${money(it.subtotal || (it.qty || 1) * (it.price || 0))}</td>
+            ${items.length > 0 ? items.map(it => `
+              <tr style="border-bottom:1px solid #e0e0e0;">
+                <td style="padding:0.5rem;">${esc(it.concept || '-')}</td>
+                <td style="padding:0.5rem; text-align:center;">${esc(it.qty || 1)}</td>
+                <td style="padding:0.5rem; text-align:right;">${money(it.price || 0)}</td>
+                <td style="padding:0.5rem; text-align:right;">${money(it.subtotal || (it.qty || 1) * (it.price || 0))}</td>
               </tr>
-            `).join('')}
+            `).join('') : '<tr><td colspan="4" style="padding:1rem; text-align:center;" class="muted">Sin conceptos</td></tr>'}
           </tbody>
           <tfoot>
-            <tr style="background:#f5f5f5; font-weight:bold;">
-              <td colspan="3" style="padding:0.5rem; text-align:right;">TOTAL:</td>
-              <td style="padding:0.5rem; text-align:right;">${money(invoice.total)}</td>
+            <tr style="background:#f5f5f5; font-weight:bold; font-size:1.1rem;">
+              <td colspan="3" style="padding:0.75rem; text-align:right;">TOTAL:</td>
+              <td style="padding:0.75rem; text-align:right; color:#2e7d32;">${money(invoice.total)}</td>
             </tr>
           </tfoot>
         </table>
       </div>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
+        <div>
+          <div class="muted" style="font-size:0.85rem;">Método de Pago</div>
+          <div><strong>${esc(invoice.method || '-')}</strong></div>
+        </div>
+        <div>
+          <div class="muted" style="font-size:0.85rem;">Estado</div>
+          <div><span class="badge ${invoice.status}">${esc(invoice.status)}</span></div>
+        </div>
+      </div>
+
+      ${invoice.card_last_four ? `
+      <div style="background:#fff3cd; padding:0.75rem; border-radius:4px; border-left:4px solid #ffc107;">
+        <div class="muted" style="font-size:0.85rem;">Tarjeta de Crédito</div>
+        <div><strong>****-****-****-${esc(invoice.card_last_four)}</strong></div>
+      </div>
+      ` : ''}
+
+      ${invoice.refund_amount > 0 ? `
+      <div style="background:#ffebee; padding:0.75rem; border-radius:4px; border-left:4px solid #f44336;">
+        <h4 style="margin:0 0 0.5rem 0; color:#c62828;">Reembolso Procesado</h4>
+        <div><strong>Monto:</strong> ${money(invoice.refund_amount)}</div>
+        <div><strong>Razón:</strong> ${esc(invoice.refund_reason || '-')}</div>
+        <div><strong>Fecha:</strong> ${esc(fmtDT(invoice.refunded_at))}</div>
+      </div>
+      ` : ''}
+
+      ${invoice.paid_at ? `
+      <div class="muted" style="font-size:0.85rem; text-align:right;">
+        Pagado el: ${esc(fmtDT(invoice.paid_at))}
+      </div>
+      ` : ''}
+
       <button class="btn" onclick="this.closest('.overlay').remove()">Cerrar</button>
     </div>
   `);
