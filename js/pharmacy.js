@@ -1,10 +1,10 @@
-import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtD, fmtDT, S } from './core.js';
+import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtD, fmtDT, S, openModal } from './core.js';
 
 export async function render(el) {
   const isPharmacist = isRole('admin', 'pharmacist');
   
   // Cargar datos en paralelo
-  const [{ data: rx }, { data: products }, { data: batches }, { data: movements }] = await Promise.all([
+  const [{ data: rx }, { data: products }, { data: batches }, { data: movements }, { data: suppliers }, { data: orders }] = await Promise.all([
     sb.from('prescriptions').select(`
       *,
       patient:patients(first_name, last_name, dpi),
@@ -13,7 +13,9 @@ export async function render(el) {
     `).order('created_at', { ascending: false }).limit(50),
     sb.from('products').select('*').order('name'),
     isPharmacist ? sb.from('product_batches').select('*, products(name)').order('expiration_date').limit(100) : { data: [] },
-    isPharmacist ? sb.from('inventory_movements').select('*, products(name), profiles(full_name)').order('performed_at', { ascending: false }).limit(50) : { data: [] }
+    isPharmacist ? sb.from('inventory_movements').select('*, products(name), profiles(full_name)').order('performed_at', { ascending: false }).limit(50) : { data: [] },
+    isPharmacist ? sb.from('suppliers').select('*').eq('is_active', true).order('name') : { data: [] },
+    isPharmacist ? sb.from('purchase_orders').select('*, suppliers(name)').order('created_at', { ascending: false }).limit(50) : { data: [] }
   ]);
 
   // Alertas de vencimiento próximo (30 días)
@@ -25,7 +27,10 @@ export async function render(el) {
   el.innerHTML = `
     <div class="bar">
       <h2>Farmacia e Inventario</h2>
-      ${isPharmacist ? `<button class="btn" id="btn-new-receiving">Recibir Orden de Compra</button>` : ''}
+      ${isPharmacist ? `
+        <button class="btn" id="btn-new-order">Nueva Orden de Compra</button>
+        <button class="btn" id="btn-manage-suppliers">Gestionar Proveedores</button>
+      ` : ''}
     </div>
 
     ${expiringSoon.length > 0 ? `
@@ -53,17 +58,32 @@ export async function render(el) {
     </div>
 
     ${isPharmacist ? `
+    <!-- Órdenes de Compra -->
+    <div class="card" style="margin-top:1rem">
+      <h3>Órdenes de Compra</h3>
+      ${tbl(['Número', 'Proveedor', 'Fecha', 'Total', 'Estado', 'Acción'], (orders?.data || []).map(o => [
+        esc(o.order_number),
+        esc(o.suppliers?.name || 'N/A'),
+        esc(fmtDT(o.created_at)),
+        money(o.total),
+        `<span class="badge ${o.status === 'recibida' ? 'atendida' : o.status === 'cancelada' ? 'cancelada' : 'pendiente'}">${esc(o.status)}</span>`,
+        o.status === 'pendiente' ? `
+          <button class="btn sm" data-receive="${o.id}">Recibir</button>
+          <button class="btn sm bad" data-cancel-order="${o.id}">Cancelar</button>
+        ` : '<span class="muted">-</span>'
+      ]))}
+    </div>
+
     <!-- Gestión de Lotes -->
     <div class="card" style="margin-top:1rem">
       <h3>Lotes de Productos</h3>
-      <button class="btn sm" id="btn-new-batch" style="margin-bottom:0.5rem">+ Nuevo Lote</button>
-      ${tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante', 'Proveedor'], (batches?.data || []).map(b => [
+      <button class="btn sm" id="btn-new-batch" style="margin-bottom:0.5rem">+ Nuevo Lote Manual</button>
+      ${tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante'], (batches?.data || []).map(b => [
         esc(b.products?.name || 'N/A'),
         esc(b.batch_number),
         fmtD(b.expiration_date),
         esc(b.quantity),
-        `<strong>${esc(b.remaining_quantity)}</strong>`,
-        esc(b.supplier_id ? 'Con proveedor' : '-')
+        `<strong>${esc(b.remaining_quantity)}</strong>`
       ]))}
     </div>
 
@@ -99,21 +119,58 @@ export async function render(el) {
       return;
     }
 
-    // Nuevo lote
+    // Nuevo lote manual
     if (e.target.id === 'btn-new-batch') {
       openBatchModal(products?.data || [], render.bind(null, el));
       return;
     }
 
-    // Recibir orden de compra
-    if (e.target.id === 'btn-new-receiving') {
-      toast('Funcionalidad de Órdenes de Compra disponible en próximo módulo');
+    // Nueva orden de compra
+    if (e.target.id === 'btn-new-order') {
+      openOrderModal(products?.data || [], suppliers?.data || [], render.bind(null, el));
+      return;
+    }
+
+    // Gestionar proveedores
+    if (e.target.id === 'btn-manage-suppliers') {
+      openSuppliersModal(suppliers?.data || [], render.bind(null, el));
+      return;
+    }
+
+    // Recibir orden
+    const receiveBtn = e.target.closest('[data-receive]');
+    if (receiveBtn) {
+      const id = receiveBtn.dataset.receive;
+      if (!confirm('¿Confirmar recepción de esta orden? Se actualizará el inventario automáticamente.')) return;
+      
+      const { error } = await sb.rpc('receive_purchase_order', { p_order_id: id });
+      if (error) fail(error);
+      else {
+        toast('Orden recibida e inventario actualizado');
+        render(el);
+      }
+      return;
+    }
+
+    // Cancelar orden
+    const cancelBtn = e.target.closest('[data-cancel-order]');
+    if (cancelBtn) {
+      const id = cancelBtn.dataset.cancelOrder;
+      if (!confirm('¿Cancelar esta orden de compra?')) return;
+      
+      const { error } = await sb.from('purchase_orders').update({ status: 'cancelada' }).eq('id', id);
+      if (error) fail(error);
+      else {
+        toast('Orden cancelada');
+        render(el);
+      }
+      return;
     }
   });
 }
 
 function openBatchModal(products, onClose) {
-  const { el, close } = openModal('Nuevo Lote de Producto', `
+  const { el, close } = openModal('Nuevo Lote de Producto (Ingreso Manual)', `
     <form id="batch-form" style="display:grid; gap:0.75rem;">
       <div>
         <label>Producto</label>
@@ -159,9 +216,8 @@ function openBatchModal(products, onClose) {
       fail(error);
     } else {
       // Actualizar stock total del producto
-      await sb.from('products').update({ 
-        stock: sb.rpc('increment_stock', { product_id: payload.product_id, amount: payload.quantity })
-      }).eq('id', payload.product_id);
+      const { data: product } = await sb.from('products').select('stock').eq('id', payload.product_id).single();
+      await sb.from('products').update({ stock: (product?.stock || 0) + payload.quantity }).eq('id', payload.product_id);
       
       // Registrar movimiento
       await sb.from('inventory_movements').insert({
@@ -176,4 +232,218 @@ function openBatchModal(products, onClose) {
       onClose();
     }
   };
+}
+
+function openOrderModal(products, suppliers, onClose) {
+  const { el, close } = openModal('Nueva Orden de Compra', `
+    <form id="order-form" style="display:grid; gap:0.75rem;">
+      <div>
+        <label>Proveedor</label>
+        <select name="supplier_id" required style="width:100%">
+          <option value="">Seleccionar proveedor...</option>
+          ${suppliers.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <h4 style="margin:0;">Productos de la orden</h4>
+          <button type="button" class="btn sm" id="btn-add-product">+ Agregar producto</button>
+        </div>
+        <div id="order-items"></div>
+        <div style="display:flex; justify-content:flex-end; margin-top:0.5rem; font-size:1.2rem;">
+          <strong>Total: <span id="order-total">Q0.00</span></strong>
+        </div>
+      </div>
+
+      <div>
+        <label>Notas (opcional)</label>
+        <textarea name="notes" rows="2" style="width:100%"></textarea>
+      </div>
+
+      <button type="submit" class="btn">Crear Orden</button>
+    </form>
+  `);
+
+  let items = [];
+  const itemsEl = $('#order-items', el);
+  const totalEl = $('#order-total', el);
+
+  const paintItems = () => {
+    itemsEl.innerHTML = items.length
+      ? items.map((item, idx) => `
+        <div style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
+          <select data-idx="${idx}" data-field="product_id" required style="width:100%">
+            <option value="">Producto...</option>
+            ${products.map(p => `<option value="${p.id}" ${p.id === item.product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <input type="number" data-idx="${idx}" data-field="quantity" value="${item.quantity}" min="1" required placeholder="Cant." style="width:100%">
+          <input type="number" data-idx="${idx}" data-field="unit_price" value="${item.unit_price}" step="0.01" min="0" required placeholder="Precio" style="width:100%">
+          <input type="text" data-idx="${idx}" data-field="batch_number" value="${item.batch_number}" placeholder="Lote" style="width:100%">
+          <input type="date" data-idx="${idx}" data-field="expiration_date" value="${item.expiration_date}" style="width:100%">
+          <button type="button" class="btn sm bad" data-remove="${idx}">✕</button>
+        </div>
+      `).join('')
+      : '<p class="muted">Sin productos. Agregue al menos uno.</p>';
+
+    const total = items.reduce((sum, i) => sum + (Number(i.quantity) * Number(i.unit_price)), 0);
+    totalEl.textContent = money(total);
+  };
+
+  $('#btn-add-product', el).onclick = () => {
+    items.push({ product_id: '', quantity: 1, unit_price: 0, batch_number: '', expiration_date: '' });
+    paintItems();
+  };
+
+  itemsEl.oninput = e => {
+    const idx = e.target.dataset.idx;
+    const field = e.target.dataset.field;
+    if (idx !== undefined && field) {
+      items[Number(idx)][field] = field === 'product_id' || field === 'batch_number' ? e.target.value : Number(e.target.value);
+      const total = items.reduce((sum, i) => sum + (Number(i.quantity) * Number(i.unit_price)), 0);
+      totalEl.textContent = money(total);
+    }
+  };
+
+  itemsEl.onclick = e => {
+    const idx = e.target.dataset.remove;
+    if (idx !== undefined) {
+      items.splice(Number(idx), 1);
+      paintItems();
+    }
+  };
+
+  $('#order-form', el).onsubmit = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+
+    if (items.length === 0) {
+      return fail('Agregue al menos un producto a la orden.');
+    }
+
+    const cleanItems = items.map(item => {
+      const product = products.find(p => p.id === item.product_id);
+      return {
+        product_id: item.product_id,
+        product_name: product?.name || 'N/A',
+        quantity: Number(item.quantity),
+        unit_price: Number(item.unit_price),
+        batch_number: item.batch_number,
+        expiration_date: item.expiration_date
+      };
+    });
+
+    if (cleanItems.some(i => !i.product_id || !i.batch_number || !i.expiration_date)) {
+      return fail('Complete todos los campos de cada producto (incluyendo lote y vencimiento).');
+    }
+
+    const total = cleanItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
+
+    const payload = {
+      supplier_id: formData.get('supplier_id'),
+      items: cleanItems,
+      total: total,
+      status: 'pendiente',
+      notes: formData.get('notes') || null
+    };
+
+    const { error } = await sb.from('purchase_orders').insert(payload);
+    if (error) {
+      fail(error);
+    } else {
+      toast('Orden de compra creada exitosamente');
+      close();
+      onClose();
+    }
+  };
+
+  paintItems();
+}
+
+function openSuppliersModal(suppliers, onClose) {
+  const { el, close } = openModal('Gestión de Proveedores', `
+    <div style="display:grid; gap:1rem;">
+      <button class="btn" id="btn-new-supplier">+ Nuevo Proveedor</button>
+      <div id="suppliers-list"></div>
+    </div>
+  `);
+
+  const paintSuppliers = () => {
+    $('#suppliers-list', el).innerHTML = suppliers.length
+      ? tbl(['Nombre', 'Contacto', 'Teléfono', 'Email', 'Acciones'], suppliers.map(s => [
+          esc(s.name),
+          esc(s.contact_name || '-'),
+          esc(s.phone || '-'),
+          esc(s.email || '-'),
+          `<button class="btn sm bad" data-delete-supplier="${s.id}">Eliminar</button>`
+        ]))
+      : '<p class="muted">No hay proveedores registrados.</p>';
+  };
+
+  $('#btn-new-supplier', el).onclick = () => {
+    const { el: modalEl, close: closeModal } = openModal('Nuevo Proveedor', `
+      <form id="supplier-form" style="display:grid; gap:0.75rem;">
+        <div>
+          <label>Nombre</label>
+          <input type="text" name="name" required style="width:100%">
+        </div>
+        <div>
+          <label>Persona de contacto</label>
+          <input type="text" name="contact_name" style="width:100%">
+        </div>
+        <div>
+          <label>Teléfono</label>
+          <input type="tel" name="phone" style="width:100%">
+        </div>
+        <div>
+          <label>Email</label>
+          <input type="email" name="email" style="width:100%">
+        </div>
+        <div>
+          <label>Dirección</label>
+          <textarea name="address" rows="2" style="width:100%"></textarea>
+        </div>
+        <div>
+          <label>NIT / ID Fiscal</label>
+          <input type="text" name="tax_id" style="width:100%">
+        </div>
+        <button type="submit" class="btn">Crear Proveedor</button>
+      </form>
+    `);
+
+    $('#supplier-form', modalEl).onsubmit = async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const payload = Object.fromEntries(formData);
+
+      const { error } = await sb.from('suppliers').insert(payload);
+      if (error) {
+        fail(error);
+      } else {
+        toast('Proveedor creado exitosamente');
+        closeModal();
+        suppliers.push({ ...payload, id: crypto.randomUUID(), is_active: true });
+        paintSuppliers();
+      }
+    };
+  };
+
+  el.addEventListener('click', async (e) => {
+    const deleteBtn = e.target.closest('[data-delete-supplier]');
+    if (deleteBtn) {
+      const id = deleteBtn.dataset.deleteSupplier;
+      if (!confirm('¿Eliminar este proveedor?')) return;
+
+      const { error } = await sb.from('suppliers').update({ is_active: false }).eq('id', id);
+      if (error) {
+        fail(error);
+      } else {
+        toast('Proveedor desactivado');
+        suppliers = suppliers.filter(s => s.id !== id);
+        paintSuppliers();
+      }
+    }
+  });
+
+  paintSuppliers();
 }
