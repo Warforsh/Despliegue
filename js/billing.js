@@ -204,13 +204,15 @@ function openInvoiceModal(patients, onClose) {
       return;
     }
 
+    const consultationFee = window.APP_CONFIG?.CONSULTATION_FEE || 150;
+
     let html = '<div style="display:grid; gap:0.5rem;">';
     if (consultations.length > 0) {
       html += `<div><strong>Consultas médicas:</strong></div>`;
-      html += consultations.map((c, i) => `
+      html += consultations.map((c) => `
         <label style="display:flex; gap:0.5rem; align-items:center; padding:0.25rem; background:#f5f5f5; border-radius:4px;">
-          <input type="checkbox" data-type="consultation" data-id="${c.id}" data-price="${window.APP_CONFIG?.CONSULTATION_FEE || 150}" data-name="Consulta médica - ${esc(c.doctor)} (${esc(c.date?.split('T')[0] || '')})">
-          <span>${esc(c.doctor)} — ${esc(new Date(c.date).toLocaleDateString('es-GT'))} — <strong>Q${Number(window.APP_CONFIG?.CONSULTATION_FEE || 150).toFixed(2)}</strong></span>
+          <input type="checkbox" data-type="consultation" data-id="${c.id}" data-price="${consultationFee}" data-name="Consulta médica - ${esc(c.doctor)} (${esc(c.date?.split('T')[0] || '')})">
+          <span>${esc(c.doctor)} — ${esc(new Date(c.date).toLocaleDateString('es-GT'))} — <strong>Q${Number(consultationFee).toFixed(2)}</strong></span>
         </label>
       `).join('');
     }
@@ -350,9 +352,41 @@ function openInvoiceDetailModal(invoice) {
       <div><strong>Método:</strong> ${esc(invoice.method || '-')}</div>
       ${invoice.card_last_four ? `<div><strong>Tarjeta:</strong> ****-****-****-${esc(invoice.card_last_four)}</div>` : ''}
       <div><strong>Estado:</strong> <span class="badge ${invoice.status}">${esc(invoice.status)}</span></div>
+      ${invoice.refund_amount > 0 ? `
+        <div style="background:#ffebee; padding:0.5rem; border-radius:4px; border-left:4px solid #f44336;">
+          <strong>Reembolso:</strong> ${money(invoice.refund_amount)}<br>
+          <strong>Razón:</strong> ${esc(invoice.refund_reason || '-')}<br>
+          <strong>Fecha:</strong> ${esc(fmtDT(invoice.refunded_at))}
+        </div>
+      ` : ''}
       <div>
         <strong>Conceptos:</strong>
-        <pre style="background:#f5f5f5; padding:0.5rem; border-radius:4px; overflow-x:auto;">${esc(JSON.stringify(invoice.items, null, 2))}</pre>
+        <table style="width:100%; border-collapse:collapse; margin-top:0.5rem;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="text-align:left; padding:0.5rem;">Concepto</th>
+              <th style="text-align:right; padding:0.5rem;">Cant.</th>
+              <th style="text-align:right; padding:0.5rem;">Precio</th>
+              <th style="text-align:right; padding:0.5rem;">Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(invoice.items || []).map(it => `
+              <tr>
+                <td style="padding:0.5rem; border-top:1px solid #e0e0e0;">${esc(it.concept || it.name || '-')}</td>
+                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${esc(it.qty || 1)}</td>
+                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${money(it.price)}</td>
+                <td style="padding:0.5rem; border-top:1px solid #e0e0e0; text-align:right;">${money(it.subtotal || (it.qty || 1) * (it.price || 0))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+          <tfoot>
+            <tr style="background:#f5f5f5; font-weight:bold;">
+              <td colspan="3" style="padding:0.5rem; text-align:right;">TOTAL:</td>
+              <td style="padding:0.5rem; text-align:right;">${money(invoice.total)}</td>
+            </tr>
+          </tfoot>
+        </table>
       </div>
       <button class="btn" onclick="this.closest('.overlay').remove()">Cerrar</button>
     </div>
@@ -362,13 +396,16 @@ function openInvoiceDetailModal(invoice) {
 function openRefundModal(invoiceId, onClose) {
   const { el, close } = openModal('Procesar Reembolso', `
     <form id="refund-form" style="display:grid; gap:0.75rem;">
+      <div style="background:#fff3cd; padding:0.75rem; border-radius:4px; border-left:4px solid #ffc107;">
+        <strong>⚠️ Atención:</strong> Esta acción registrará un reembolso en el sistema. Asegúrese de devolver el dinero al paciente antes de confirmar.
+      </div>
       <div>
         <label>Monto del Reembolso (Q)</label>
         <input type="number" name="refund_amount" step="0.01" min="0" required style="width:100%">
       </div>
       <div>
         <label>Razón del Reembolso</label>
-        <textarea name="refund_reason" rows="3" required style="width:100%"></textarea>
+        <textarea name="refund_reason" rows="3" required placeholder="Ej: Error en diagnóstico, servicio no prestado, etc." style="width:100%"></textarea>
       </div>
       <button type="submit" class="btn bad">Confirmar Reembolso</button>
     </form>
