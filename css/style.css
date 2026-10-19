@@ -158,5 +158,6 @@ tbody tr:hover{background:#f8fafc}
   .scrim{display:block;position:fixed;inset:0;z-index:55;background:rgba(15,23,42,.5);opacity:0;pointer-events:none;transition:opacity .25s}
   .scrim.show{opacity:1;pointer-events:auto}
 }
+
 @media(max-width:600px){.audit-meta{white-space:normal;flex-direction:column;gap:2px}.audit-meta span:first-child{max-width:100%;overflow-wrap:anywhere}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
