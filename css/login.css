@@ -1,0 +1,73 @@
+/* ===== Login — Centro Médico Premier ===== */
+.lg-shell{--lg-p:#0e7490;--lg-pd:#0b4f63;--lg-a:#14b8a6;--lg-bg:#f1f5f9;--lg-card:#fff;--lg-tx:#0f172a;--lg-mu:#64748b;--lg-bd:#cbd5e1;--lg-bad:#dc2626;--lg-ok:#16a34a;
+  display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);min-height:100vh;background:var(--lg-bg);color:var(--lg-tx)}
+.lg-shell *{box-sizing:border-box}
+
+/* Panel de marca */
+.lg-brand{position:relative;overflow:hidden;color:#fff;padding:56px 56px 40px;display:flex;flex-direction:column;justify-content:space-between;
+  background:linear-gradient(145deg,var(--lg-pd) 0%,var(--lg-p) 55%,var(--lg-a) 120%)}
+.lg-brand::before,.lg-brand::after{content:"";position:absolute;border-radius:50%;background:rgba(255,255,255,.08);animation:lg-float 14s ease-in-out infinite}
+.lg-brand::before{width:420px;height:420px;right:-140px;top:-120px}
+.lg-brand::after{width:300px;height:300px;left:-100px;bottom:-90px;animation-delay:-6s}
+@keyframes lg-float{50%{transform:translate(18px,22px) scale(1.06)}}
+.lg-logo{display:flex;align-items:center;gap:12px;font-weight:700;font-size:19px;letter-spacing:.2px;position:relative;z-index:1}
+.lg-logo i{display:grid;place-items:center;width:44px;height:44px;border-radius:12px;background:rgba(255,255,255,.18);backdrop-filter:blur(6px)}
+.lg-hero{position:relative;z-index:1;max-width:460px}
+.lg-hero h2{font-size:clamp(28px,3.2vw,40px);line-height:1.15;margin:0 0 14px}
+.lg-hero p{margin:0 0 26px;opacity:.9;font-size:16px}
+.lg-hero ul{list-style:none;margin:0;padding:0;display:grid;gap:14px}
+.lg-hero li{display:flex;gap:12px;align-items:center;font-size:15px}
+.lg-hero li i{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:rgba(255,255,255,.16)}
+.lg-foot{position:relative;z-index:1;font-size:12.5px;opacity:.75}
+
+/* Panel del formulario */
+.lg-panel{display:flex;align-items:center;justify-content:center;padding:32px 20px}
+.lg-card{width:100%;max-width:420px;background:var(--lg-card);border:1px solid #e2e8f0;border-radius:20px;padding:34px 30px;box-shadow:0 20px 50px -20px rgba(14,116,144,.35);animation:lg-in .45s ease both}
+@keyframes lg-in{from{opacity:0;transform:translateY(14px)}}
+.lg-card h1{font-size:25px;margin:0 0 4px}.lg-sub{margin:0 0 22px;color:var(--lg-mu);font-size:14.5px}
+.lg-tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;background:#f1f5f9;padding:4px;border-radius:12px;margin-bottom:22px}
+.lg-tabs button{border:0;background:transparent;padding:9px;border-radius:9px;font:inherit;font-weight:600;color:var(--lg-mu);cursor:pointer;transition:.2s}
+.lg-tabs button.on{background:#fff;color:var(--lg-p);box-shadow:0 1px 4px rgba(15,23,42,.12)}
+
+/* Campos con etiqueta flotante */
+.lg-f{position:relative;margin-bottom:14px}
+.lg-f input{width:100%;height:52px;padding:20px 44px 6px 44px;border:1.5px solid var(--lg-bd);border-radius:12px;font:inherit;background:#fff;color:var(--lg-tx);transition:border-color .2s,box-shadow .2s}
+.lg-f input:focus{outline:0;border-color:var(--lg-p);box-shadow:0 0 0 4px rgba(14,116,144,.15)}
+.lg-f label{position:absolute;left:44px;top:15px;font-size:15px;color:var(--lg-mu);pointer-events:none;transition:.15s;transform-origin:left top}
+.lg-f input:focus+label,.lg-f input:not(:placeholder-shown)+label,.lg-f input:-webkit-autofill+label{transform:translateY(-9px) scale(.78);color:var(--lg-p)}
+.lg-i{position:absolute;left:14px;top:15px;color:var(--lg-mu);display:grid;pointer-events:none}
+.lg-f input:focus~.lg-i{color:var(--lg-p)}
+.lg-eye{position:absolute;right:6px;top:6px;width:40px;height:40px;border:0;background:transparent;border-radius:10px;color:var(--lg-mu);cursor:pointer;display:grid;place-items:center}
+.lg-eye:hover{background:#f1f5f9;color:var(--lg-p)}
+.lg-f.bad input{border-color:var(--lg-bad)}
+
+/* Fuerza de contraseña */
+.lg-str{display:none;margin:-4px 0 14px}.lg-str.show{display:block}
+.lg-str div{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.lg-str div i{height:5px;border-radius:9px;background:#e2e8f0;transition:.25s}
+.lg-str small{display:block;margin-top:5px;color:var(--lg-mu);font-size:12px}
+.lg-str[data-s="1"] i:nth-child(-n+1){background:#ef4444}.lg-str[data-s="2"] i:nth-child(-n+2){background:#f59e0b}
+.lg-str[data-s="3"] i:nth-child(-n+3){background:#84cc16}.lg-str[data-s="4"] i{background:#16a34a}
+
+/* Extras */
+.lg-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:2px 0 18px;font-size:13.5px}
+.lg-chk{display:flex;align-items:center;gap:8px;color:var(--lg-mu);cursor:pointer}.lg-chk input{width:16px;height:16px;accent-color:var(--lg-p)}
+.lg-card a{color:var(--lg-p);font-weight:600;text-decoration:none;cursor:pointer}.lg-card a:hover{text-decoration:underline}
+.lg-btn{width:100%;height:50px;border:0;border-radius:12px;font:inherit;font-weight:700;font-size:15.5px;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;
+  background:linear-gradient(135deg,var(--lg-p),var(--lg-pd));box-shadow:0 8px 18px -8px rgba(14,116,144,.7);transition:transform .15s,box-shadow .15s,opacity .2s}
+.lg-btn:hover{transform:translateY(-1px);box-shadow:0 12px 22px -8px rgba(14,116,144,.75)}.lg-btn:disabled{opacity:.7;cursor:wait;transform:none}
+.lg-btn .sp{width:18px;height:18px;border:2.5px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:lg-spin .7s linear infinite}
+@keyframes lg-spin{to{transform:rotate(360deg)}}
+.lg-msg{display:flex;gap:8px;align-items:flex-start;padding:10px 12px;border-radius:10px;font-size:13.5px;margin-bottom:14px}
+.lg-msg[hidden]{display:none}.lg-msg.err{background:#fee2e2;color:#991b1b}.lg-msg.ok{background:#dcfce7;color:#166534}
+.lg-back{display:inline-flex;align-items:center;gap:6px;margin-bottom:16px;font-size:14px}
+.lg-done{text-align:center;padding:10px 0}.lg-done .ic{width:64px;height:64px;margin:0 auto 14px;border-radius:50%;display:grid;place-items:center;background:#dcfce7;color:var(--lg-ok)}
+.lg-secure{margin-top:20px;text-align:center;color:var(--lg-mu);font-size:12.5px;display:flex;gap:6px;justify-content:center;align-items:center}
+
+/* Responsive */
+@media(max-width:900px){.lg-shell{grid-template-columns:1fr;grid-template-rows:auto 1fr}.lg-brand{padding:22px 22px 26px}.lg-hero,.lg-foot{display:none}.lg-panel{padding:0 14px 28px;align-items:flex-start;margin-top:-6px;position:relative;z-index:2}}
+/* Modo oscuro */
+@media(prefers-color-scheme:dark){.lg-shell{--lg-bg:#0b1220;--lg-card:#111a2e;--lg-tx:#e5eef7;--lg-mu:#94a3b8;--lg-bd:#2b3a55}
+  .lg-card{border-color:#1e2a44;box-shadow:0 20px 50px -20px #000}.lg-f input{background:#0b1220}.lg-tabs{background:#0b1220}.lg-tabs button.on{background:#1a2640;color:#5eead4}
+  .lg-card a,.lg-f input:focus+label,.lg-f input:not(:placeholder-shown)+label{color:#5eead4}.lg-eye:hover{background:#1a2640}
+  .lg-msg.err{background:#3b1519;color:#fecaca}.lg-msg.ok{background:#12301f;color:#bbf7d0}}
+@media(prefers-reduced-motion:reduce){.lg-shell *,.lg-shell *::before,.lg-shell *::after{animation:none!important;transition:none!important}}

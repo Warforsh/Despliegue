@@ -1,4 +1,8 @@
-import { sb, S, $, esc, toast, fail, isRole } from './core.js';
+import { sb, S, $, esc, isRole } from './core.js';
+import { authView } from './login.js';
+
+// Enlace de recuperación de contraseña (Supabase añade #...type=recovery)
+let RECOVERY = /type=recovery/.test(location.hash);
 
 const STAFF = ['admin', 'doctor', 'nurse', 'pharmacist', 'cashier'];
 const ROUTES = {
@@ -19,39 +23,15 @@ async function boot() {
     $('#app').innerHTML = '<div class="auth"><h3>Falta configuración</h3><p>No se encontró config.js. Defina SUPABASE_URL y SUPABASE_ANON_KEY (ver README).</p></div>'; return;
   }
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) return authView();
+  if (RECOVERY) { RECOVERY = false; return authView(boot, 'recovery'); }
+  if (!session) return authView(boot);
   S.user = session.user;
   const { data, error } = await sb.from('profiles').select('*').eq('id', S.user.id).single();
-  if (error) { await sb.auth.signOut(); return authView(); }
+  if (error) { await sb.auth.signOut(); return authView(boot); }
   S.profile = data;
   shell();
   if (!location.hash) location.hash = isRole('patient') ? '#/me' : '#/dashboard';
   route();
-}
-
-function authView(mode = 'login') {
-  const reg = mode === 'register';
-  $('#app').innerHTML = `<div class="auth"><h2>🏥 Centro Médico Premier</h2><p class="muted">${reg ? 'Crear cuenta de paciente' : 'Iniciar sesión'}</p>
-  <form id="f">${reg ? '<input name="name" placeholder="Nombre completo" required>' : ''}
-  <input name="email" type="email" placeholder="Correo" required autocomplete="email">
-  <input name="password" type="password" placeholder="Contraseña (mín. 8)" minlength="8" required autocomplete="${reg ? 'new-password' : 'current-password'}">
-  <button class="btn" style="width:100%">${reg ? 'Registrarme' : 'Entrar'}</button></form>
-  <p><a href="#" id="sw">${reg ? 'Ya tengo cuenta' : 'Crear cuenta de paciente'}</a></p></div>`;
-  $('#sw').onclick = e => { e.preventDefault(); authView(reg ? 'login' : 'register'); };
-  $('#f').onsubmit = async e => {
-    e.preventDefault();
-    const f = Object.fromEntries(new FormData(e.target));
-    if (reg) {
-      const { data, error } = await sb.auth.signUp({ email: f.email, password: f.password, options: { data: { full_name: f.name }, emailRedirectTo: location.origin } });
-      if (error) return fail(error);
-      if (data.session) return boot();
-      toast('Cuenta creada. Revise su correo para confirmarla y luego inicie sesión.'); authView();
-    } else {
-      const { error } = await sb.auth.signInWithPassword({ email: f.email, password: f.password });
-      if (error) return fail(error);
-      boot();
-    }
-  };
 }
 
 function shell() {
@@ -74,5 +54,8 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
-sb?.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT') { S.user = S.profile = null; } });
+sb.auth.onAuthStateChange(ev => {
+  if (ev === 'SIGNED_OUT') { S.user = S.profile = null; }
+  if (ev === 'PASSWORD_RECOVERY') authView(boot, 'recovery');
+});
 boot();
