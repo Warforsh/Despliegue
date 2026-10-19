@@ -1,4 +1,4 @@
-import { sb, S, $, esc, isRole } from './core.js';
+import { sb, S, $, esc, isRole, SessionManager } from './core.js';
 import { authView } from './login.js';
 import { ico } from './icons.js';
 
@@ -32,6 +32,10 @@ async function boot() {
   const { data, error } = await sb.from('profiles').select('*').eq('id', S.user.id).single();
   if (error) { await sb.auth.signOut(); return authView(boot); }
   S.profile = data;
+  
+  // Iniciar monitoreo de sesión
+  SessionManager.start();
+  
   shell();
   if (!location.hash) location.hash = isRole('patient') ? '#/me' : '#/dashboard';
   route();
@@ -62,7 +66,20 @@ function shell() {
     <main id="view"></main></div>`;
   $('#burger').onclick = () => setNav(!$('#side').classList.contains('open'));
   $('#scrim').onclick = () => setNav(false);
-  $('#out').onclick = async e => { e.preventDefault(); await sb.auth.signOut(); location.hash = ''; boot(); };
+  
+  // Cierre de sesión robusto con detención del monitoreo
+  $('#out').onclick = async e => { 
+    e.preventDefault(); 
+    SessionManager.stop();
+    try {
+      await sb.rpc('close_session').catch(() => {});
+      await sb.auth.signOut({ scope: 'local' });
+    } catch (err) {
+      console.warn('Logout error:', err);
+    }
+    location.hash = ''; 
+    boot(); 
+  };
 }
 
 async function route() {
@@ -80,7 +97,10 @@ async function route() {
 window.addEventListener('hashchange', route);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') setNav(false); });
 sb.auth.onAuthStateChange(ev => {
-  if (ev === 'SIGNED_OUT') { S.user = S.profile = null; }
+  if (ev === 'SIGNED_OUT') { 
+    S.user = S.profile = null; 
+    SessionManager.stop();
+  }
   if (ev === 'PASSWORD_RECOVERY') authView(boot, 'recovery');
 });
 boot();

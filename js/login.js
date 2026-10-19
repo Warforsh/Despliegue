@@ -1,4 +1,4 @@
-import { sb, $, esc } from './core.js';
+import { sb, $, esc, fail } from './core.js';
 
 // Carga el CSS del login automáticamente (no hace falta tocar index.html)
 if (!document.getElementById('lg-css')) {
@@ -121,8 +121,34 @@ export function authView(boot, mode = 'login') {
     busy(true);
     try {
       if (mode === 'login') {
-        const { error } = await sb.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
+        const { data: authData, error } = await sb.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
         if (error) throw error;
+
+        // --- VERIFICACIÓN DE MULTI-SESIÓN ---
+        try {
+          const { data: canLogin, error: checkError } = await sb.rpc('check_can_login', { p_user_id: authData.user.id });
+          if (checkError) throw checkError;
+          
+          if (canLogin && !canLogin.allowed) {
+            await sb.auth.signOut({ scope: 'local' });
+            throw new Error(canLogin.message || 'Este usuario ya tiene una sesión activa en otro dispositivo.');
+          }
+
+          // Registrar la nueva sesión
+          const { data: { session } } = await sb.auth.getSession();
+          await sb.rpc('register_session', {
+            p_refresh_token_id: session?.refresh_token || 'unknown',
+            p_device_info: navigator.userAgent.substring(0, 200),
+            p_ip_address: null
+          });
+        } catch (sessionErr) {
+          if (sessionErr.message && sessionErr.message.includes('sesión activa')) {
+            throw sessionErr;
+          }
+          console.warn('Aviso de verificación de sesión:', sessionErr);
+        }
+        // ------------------------------------
+
         setSaved($('#lg-rem').checked ? f.email.trim() : '');
         return boot();
       }
