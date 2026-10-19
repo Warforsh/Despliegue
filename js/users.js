@@ -73,17 +73,15 @@ export async function render(el) {
     <!-- Sección 4: Auditoría Reciente -->
     <div class="card" style="margin-top:1rem">
       <h3>Auditoría reciente</h3>
-      ${tbl(['Usuario', 'Acción', 'Entidad', 'Detalle', 'Fecha'], (logs || []).map(l => {
+      ${(logs || []).length ? `<div class="audit-list">${(logs || []).map(l => {
         const userName = users?.find(u => u.id === l.user_id)?.full_name || 'Sistema';
-        const detailStr = l.detail ? JSON.stringify(l.detail).substring(0, 40) + (JSON.stringify(l.detail).length > 40 ? '...' : '') : '-';
-        return [
-          esc(userName),
-          `<span class="badge">${esc(l.action)}</span>`,
-          esc(l.entity),
-          esc(l.entity_id || detailStr),
-          esc(new Date(l.created_at).toLocaleString('es-GT'))
-        ];
-      }))}
+        const json = l.detail ? JSON.stringify(l.detail) : '';
+        const detailStr = json ? json.substring(0, 60) + (json.length > 60 ? '...' : '') : '-';
+        return `<div class="audit-item">
+          <div class="audit-main"><b>${esc(userName)}</b> <span class="badge">${esc(l.action)}</span> <span class="muted">${esc(l.entity)}</span></div>
+          <div class="audit-meta muted"><span title="${esc(json || l.entity_id || '')}">${esc(l.entity_id || detailStr)}</span><span>${esc(new Date(l.created_at).toLocaleString('es-GT'))}</span></div>
+        </div>`;
+      }).join('')}</div>` : '<p class="muted">Sin registros.</p>'}
     </div>
   `;
 
