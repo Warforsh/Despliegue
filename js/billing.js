@@ -102,14 +102,28 @@ function openInvoiceModal(patients, onClose) {
           ${patients.map(p => `<option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)} - DPI: ${esc(p.dpi)}</option>`).join('')}
         </select>
       </div>
-      <div>
-        <label>Conceptos (JSON)</label>
-        <textarea name="items" rows="4" placeholder='[{"concept":"Consulta médica","qty":1,"price":150}]' required style="width:100%"></textarea>
+
+      <!-- Sección de conceptos facturables automáticos -->
+      <div id="billable-section" style="display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <h4 style="margin:0;">Conceptos pendientes de facturar</h4>
+          <button type="button" class="btn sm" id="btn-load-billable">Cargar pendientes</button>
+        </div>
+        <div id="billable-list" class="muted">Seleccione un paciente y presione "Cargar pendientes"</div>
       </div>
+
+      <!-- Líneas de conceptos dinámicas -->
       <div>
-        <label>Total (Q)</label>
-        <input type="number" name="total" step="0.01" min="0" required style="width:100%">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <h4 style="margin:0;">Conceptos de la factura</h4>
+          <button type="button" class="btn sm" id="btn-add-line">+ Agregar línea</button>
+        </div>
+        <div id="lines-container"></div>
+        <div style="display:flex; justify-content:flex-end; margin-top:0.5rem; font-size:1.2rem;">
+          <strong>Total: <span id="invoice-total">Q0.00</span></strong>
+        </div>
       </div>
+
       <div>
         <label>Método de Pago</label>
         <select name="method" required style="width:100%">
@@ -118,36 +132,191 @@ function openInvoiceModal(patients, onClose) {
         </select>
       </div>
       <div id="card-fields" style="display:none;">
-        <label>Últimos 4 dígitos de tarjeta (solo para referencia)</label>
+        <label>Últimos 4 dígitos de tarjeta (solo referencia)</label>
         <input type="text" name="card_last_four" maxlength="4" pattern="[0-9]{4}" placeholder="1234" style="width:100%">
-        <small class="muted">Por seguridad, solo registramos los últimos 4 dígitos</small>
+        <small class="muted">Por seguridad (PCI DSS), solo registramos los últimos 4 dígitos</small>
       </div>
       <button type="submit" class="btn">Crear Factura</button>
     </form>
   `);
 
-  // Mostrar/ocultar campos de tarjeta
-  const methodSelect = $('[name="method"]', el);
-  const cardFields = $('#card-fields', el);
-  methodSelect.onchange = () => {
-    cardFields.style.display = methodSelect.value === 'tarjeta' ? 'block' : 'none';
+  // --- Estado interno ---
+  let lines = []; // [{concept, qty, price}]
+  let billableData = null; // Respuesta de billable_items()
+  let consultationIds = []; // IDs de consultas a facturar
+  let prescriptionIds = []; // IDs de recetas a facturar
+
+  const linesContainer = $('#lines-container', el);
+  const totalSpan = $('#invoice-total', el);
+  const billableSection = $('#billable-section', el);
+  const billableList = $('#billable-list', el);
+
+  // --- Renderizar líneas ---
+  function renderLines() {
+    if (lines.length === 0) {
+      linesContainer.innerHTML = '<p class="muted">Sin conceptos. Agregue una línea o cargue pendientes.</p>';
+    } else {
+      linesContainer.innerHTML = lines.map((line, idx) => `
+        <div style="display:grid; grid-template-columns: 3fr 1fr 1fr auto; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
+          <input type="text" value="${esc(line.concept)}" data-idx="${idx}" data-field="concept" placeholder="Concepto" style="width:100%" required>
+          <input type="number" value="${line.qty}" data-idx="${idx}" data-field="qty" min="1" step="1" style="width:100%" required>
+          <input type="number" value="${line.price}" data-idx="${idx}" data-field="price" min="0" step="0.01" style="width:100%" required>
+          <button type="button" class="btn sm bad" data-remove="${idx}">✕</button>
+        </div>
+      `).join('');
+    }
+    updateTotal();
+  }
+
+  function updateTotal() {
+    const total = lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.price)), 0);
+    totalSpan.textContent = 'Q' + total.toFixed(2);
+  }
+
+  // --- Eventos ---
+  
+  // Mostrar sección de facturables al elegir paciente
+  $('[name="patient_id"]', el).onchange = (e) => {
+    billableSection.style.display = e.target.value ? 'block' : 'none';
+    billableList.innerHTML = '<span class="muted">Presione "Cargar pendientes"</span>';
+    billableData = null;
   };
 
+  // Cargar conceptos pendientes usando la RPC billable_items
+  $('#btn-load-billable', el).onclick = async () => {
+    const patientId = $('[name="patient_id"]', el).value;
+    if (!patientId) return;
+
+    billableList.innerHTML = '<span class="muted">Cargando...</span>';
+    const { data, error } = await sb.rpc('billable_items', { p_patient: patientId });
+    if (error) {
+      fail(error);
+      billableList.innerHTML = '<span class="muted">Error al cargar</span>';
+      return;
+    }
+
+    billableData = data;
+    const consultations = data?.consultations || [];
+    const prescriptions = data?.prescriptions || [];
+
+    if (consultations.length === 0 && prescriptions.length === 0) {
+      billableList.innerHTML = '<span class="muted">Este paciente no tiene conceptos pendientes de facturar.</span>';
+      return;
+    }
+
+    let html = '<div style="display:grid; gap:0.5rem;">';
+    if (consultations.length > 0) {
+      html += `<div><strong>Consultas médicas:</strong></div>`;
+      html += consultations.map((c, i) => `
+        <label style="display:flex; gap:0.5rem; align-items:center; padding:0.25rem; background:#f5f5f5; border-radius:4px;">
+          <input type="checkbox" data-type="consultation" data-id="${c.id}" data-price="${window.APP_CONFIG?.CONSULTATION_FEE || 150}" data-name="Consulta médica - ${esc(c.doctor)} (${esc(c.date?.split('T')[0] || '')})">
+          <span>${esc(c.doctor)} — ${esc(new Date(c.date).toLocaleDateString('es-GT'))} — <strong>Q${Number(window.APP_CONFIG?.CONSULTATION_FEE || 150).toFixed(2)}</strong></span>
+        </label>
+      `).join('');
+    }
+    if (prescriptions.length > 0) {
+      html += `<div style="margin-top:0.5rem;"><strong>Recetas dispensadas:</strong></div>`;
+      html += prescriptions.map((r) => `
+        <div style="padding:0.25rem; background:#f5f5f5; border-radius:4px;">
+          <label style="display:flex; gap:0.5rem; align-items:center;">
+            <input type="checkbox" data-type="prescription" data-id="${r.id}">
+            <span>Receta ${esc(new Date(r.date).toLocaleDateString('es-GT'))}</span>
+          </label>
+          <div style="margin-left:1.5rem; font-size:0.9em;">
+            ${(r.items || []).map(it => `${esc(it.name)} x${it.qty} — Q${(Number(it.qty) * Number(it.price)).toFixed(2)}`).join('<br>')}
+          </div>
+        </div>
+      `).join('');
+    }
+    html += `<button type="button" class="btn sm" id="btn-add-selected" style="margin-top:0.5rem;">Agregar seleccionados a la factura</button>`;
+    html += '</div>';
+    billableList.innerHTML = html;
+
+    // Evento para agregar seleccionados
+    $('#btn-add-selected', el).onclick = () => {
+      const selectedConsultations = $$('input[data-type="consultation"]:checked', el);
+      const selectedPrescriptions = $$('input[data-type="prescription"]:checked', el);
+
+      selectedConsultations.forEach(cb => {
+        lines.push({
+          concept: cb.dataset.name,
+          qty: 1,
+          price: Number(cb.dataset.price)
+        });
+        consultationIds.push(cb.dataset.id);
+      });
+
+      selectedPrescriptions.forEach(cb => {
+        const rx = billableData.prescriptions.find(p => p.id === cb.dataset.id);
+        if (rx) {
+          (rx.items || []).forEach(it => {
+            lines.push({
+              concept: `${it.name} (${rx.date?.split('T')[0] || ''})`,
+              qty: it.qty,
+              price: Number(it.price)
+            });
+          });
+          prescriptionIds.push(rx.id);
+        }
+      });
+
+      renderLines();
+      toast(`${selectedConsultations.length + selectedPrescriptions.length} concepto(s) agregado(s)`);
+    };
+  };
+
+  // Agregar línea manual
+  $('#btn-add-line', el).onclick = () => {
+    lines.push({ concept: '', qty: 1, price: 0 });
+    renderLines();
+  };
+
+  // Editar/remover líneas (delegación)
+  linesContainer.addEventListener('input', (e) => {
+    const idx = e.target.dataset.idx;
+    const field = e.target.dataset.field;
+    if (idx !== undefined && field) {
+      lines[idx][field] = field === 'concept' ? e.target.value : Number(e.target.value);
+      updateTotal();
+    }
+  });
+  linesContainer.addEventListener('click', (e) => {
+    const idx = e.target.dataset.remove;
+    if (idx !== undefined) {
+      lines.splice(Number(idx), 1);
+      renderLines();
+    }
+  });
+
+  // Mostrar/ocultar campos de tarjeta
+  $('[name="method"]', el).onchange = (e) => {
+    $('#card-fields', el).style.display = e.target.value === 'tarjeta' ? 'block' : 'none';
+  };
+
+  // Submit
   $('#invoice-form', el).onsubmit = async (e) => {
     e.preventDefault();
+    
+    if (lines.length === 0) {
+      fail('Debe agregar al menos un concepto a la factura');
+      return;
+    }
+
     const formData = new FormData(e.target);
     const method = formData.get('method');
-    
+    const total = lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.price)), 0);
+
     let payload = {
       patient_id: formData.get('patient_id'),
-      items: JSON.parse(formData.get('items')),
-      total: parseFloat(formData.get('total')),
+      consultation_id: consultationIds[0] || null, // Solo una consulta por factura (según schema)
+      prescription_ids: prescriptionIds,
+      items: lines.map(l => ({ concept: l.concept, qty: l.qty, price: l.price, subtotal: l.qty * l.price })),
+      total: total,
       method: method,
       status: 'pagada',
       paid_at: new Date().toISOString()
     };
 
-    // Solo agregar datos de tarjeta si el método es tarjeta
     if (method === 'tarjeta') {
       const cardLastFour = formData.get('card_last_four');
       if (!cardLastFour || !/^[0-9]{4}$/.test(cardLastFour)) {
@@ -166,6 +335,9 @@ function openInvoiceModal(patients, onClose) {
       onClose();
     }
   };
+
+  // Render inicial
+  renderLines();
 }
 
 function openInvoiceDetailModal(invoice) {
