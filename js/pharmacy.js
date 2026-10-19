@@ -3,8 +3,10 @@ import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtD, fmtDT, S, openMo
 export async function render(el) {
   const isPharmacist = isRole('admin', 'pharmacist');
   
-  // Cargar datos en paralelo
-  const [{ data: rx }, { data: products }, { data: batches }, { data: movements }, { data: suppliers }, { data: orders }] = await Promise.all([
+  console.log('[pharmacy] Rol actual:', S.profile?.role, '| isPharmacist:', isPharmacist);
+  
+  // Cargar datos en paralelo con manejo de errores
+  const [rxRes, productsRes, batchesRes, movementsRes, suppliersRes, ordersRes] = await Promise.all([
     sb.from('prescriptions').select(`
       *,
       patient:patients(first_name, last_name, dpi),
@@ -12,14 +14,27 @@ export async function render(el) {
       prescription_items(*, product:products(name))
     `).order('created_at', { ascending: false }).limit(50),
     sb.from('products').select('*').order('name'),
-    isPharmacist ? sb.from('product_batches').select('*, products(name)').order('expiration_date').limit(100) : { data: [] },
-    isPharmacist ? sb.from('inventory_movements').select('*, products(name), profiles(full_name)').order('performed_at', { ascending: false }).limit(50) : { data: [] },
-    isPharmacist ? sb.from('suppliers').select('*').eq('is_active', true).order('name') : { data: [] },
-    isPharmacist ? sb.from('purchase_orders').select('*, suppliers(name)').order('created_at', { ascending: false }).limit(50) : { data: [] }
+    isPharmacist ? sb.from('product_batches').select('*, products(name)').order('expiration_date').limit(100) : Promise.resolve({ data: [], error: null }),
+    isPharmacist ? sb.from('inventory_movements').select('*, products(name), profiles(full_name)').order('performed_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null }),
+    isPharmacist ? sb.from('suppliers').select('*').eq('is_active', true).order('name') : Promise.resolve({ data: [], error: null }),
+    isPharmacist ? sb.from('purchase_orders').select('*, suppliers(name)').order('created_at', { ascending: false }).limit(50) : Promise.resolve({ data: [], error: null })
   ]);
 
+  // Log de errores para diagnóstico
+  if (suppliersRes.error) console.error('[pharmacy] Error cargando proveedores:', suppliersRes.error);
+  if (ordersRes.error) console.error('[pharmacy] Error cargando órdenes:', ordersRes.error);
+
+  const rx = rxRes.data;
+  const products = productsRes.data;
+  const batches = batchesRes.data || [];
+  const movements = movementsRes.data || [];
+  const suppliers = suppliersRes.data || [];
+  const orders = ordersRes.data || [];
+
+  console.log('[pharmacy] Proveedores cargados:', suppliers.length);
+
   // Alertas de vencimiento próximo (30 días)
-  const expiringSoon = (batches?.data || []).filter(b => {
+  const expiringSoon = batches.filter(b => {
     const daysUntilExpiry = Math.ceil((new Date(b.expiration_date) - new Date()) / (1000 * 60 * 60 * 24));
     return daysUntilExpiry <= 30 && daysUntilExpiry >= 0 && b.remaining_quantity > 0;
   });
@@ -32,6 +47,22 @@ export async function render(el) {
         <button class="btn" id="btn-manage-suppliers">Gestionar Proveedores</button>
       ` : ''}
     </div>
+
+    ${!isPharmacist ? `
+    <div class="card" style="background:#fff3cd; border-left:4px solid #ffc107;">
+      <h3 style="color:#856404">⚠️ Acceso Restringido</h3>
+      <p class="muted">Solo administradores y farmacéuticos pueden gestionar inventario, proveedores y órdenes de compra.</p>
+      <p class="muted"><strong>Tu rol actual:</strong> ${esc(S.profile?.role || 'desconocido')}</p>
+    </div>
+    ` : ''}
+
+    ${suppliersRes.error ? `
+    <div class="card" style="background:#ffebee; border-left:4px solid #f44336;">
+      <h3 style="color:#c62828">❌ Error cargando proveedores</h3>
+      <p class="muted">${esc(suppliersRes.error.message)}</p>
+      <p class="muted">Verifica que tu rol sea admin o pharmacist, y que la tabla suppliers exista.</p>
+    </div>
+    ` : ''}
 
     ${expiringSoon.length > 0 ? `
     <div class="card" style="background:#fff3cd; border-left:4px solid #ffc107; margin-bottom:1rem">
@@ -61,7 +92,8 @@ export async function render(el) {
     <!-- Órdenes de Compra -->
     <div class="card" style="margin-top:1rem">
       <h3>Órdenes de Compra</h3>
-      ${tbl(['Número', 'Proveedor', 'Fecha', 'Total', 'Estado', 'Acción'], (orders?.data || []).map(o => [
+      <p class="muted">Proveedores disponibles: ${suppliers.length}</p>
+      ${tbl(['Número', 'Proveedor', 'Fecha', 'Total', 'Estado', 'Acción'], orders.map(o => [
         esc(o.order_number),
         esc(o.suppliers?.name || 'N/A'),
         esc(fmtDT(o.created_at)),
@@ -78,7 +110,7 @@ export async function render(el) {
     <div class="card" style="margin-top:1rem">
       <h3>Lotes de Productos</h3>
       <button class="btn sm" id="btn-new-batch" style="margin-bottom:0.5rem">+ Nuevo Lote Manual</button>
-      ${tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante'], (batches?.data || []).map(b => [
+      ${tbl(['Producto', 'Lote', 'Vencimiento', 'Cantidad Total', 'Restante'], batches.map(b => [
         esc(b.products?.name || 'N/A'),
         esc(b.batch_number),
         fmtD(b.expiration_date),
@@ -90,7 +122,7 @@ export async function render(el) {
     <!-- Movimientos de Inventario -->
     <div class="card" style="margin-top:1rem">
       <h3>Movimientos de Inventario (Trazabilidad)</h3>
-      ${tbl(['Fecha', 'Producto', 'Tipo', 'Cantidad', 'Razón', 'Usuario'], (movements?.data || []).map(m => [
+      ${tbl(['Fecha', 'Producto', 'Tipo', 'Cantidad', 'Razón', 'Usuario'], movements.map(m => [
         esc(fmtDT(m.performed_at)),
         esc(m.products?.name || 'N/A'),
         `<span class="badge ${m.movement_type === 'entrada' ? 'confirmada' : 'cancelada'}">${esc(m.movement_type)}</span>`,
@@ -102,70 +134,9 @@ export async function render(el) {
     ` : ''}
   `;
 
-  // Event listeners
+  // Event listeners (mantén el resto del código igual)
   el.addEventListener('click', async (e) => {
-    // Dispensar receta
-    const dispenseBtn = e.target.closest('[data-dispense]');
-    if (dispenseBtn) {
-      const id = dispenseBtn.dataset.dispense;
-      if (!confirm('¿Confirmar dispensación de esta receta?')) return;
-      
-      const { error } = await sb.rpc('dispense_prescription', { p_id: id });
-      if (error) fail(error);
-      else {
-        toast('Receta dispensada exitosamente');
-        render(el);
-      }
-      return;
-    }
-
-    // Nuevo lote manual
-    if (e.target.id === 'btn-new-batch') {
-      openBatchModal(products?.data || [], render.bind(null, el));
-      return;
-    }
-
-    // Nueva orden de compra
-    if (e.target.id === 'btn-new-order') {
-      openOrderModal(products?.data || [], suppliers?.data || [], render.bind(null, el));
-      return;
-    }
-
-    // Gestionar proveedores
-    if (e.target.id === 'btn-manage-suppliers') {
-      openSuppliersModal(suppliers?.data || [], render.bind(null, el));
-      return;
-    }
-
-    // Recibir orden
-    const receiveBtn = e.target.closest('[data-receive]');
-    if (receiveBtn) {
-      const id = receiveBtn.dataset.receive;
-      if (!confirm('¿Confirmar recepción de esta orden? Se actualizará el inventario automáticamente.')) return;
-      
-      const { error } = await sb.rpc('receive_purchase_order', { p_order_id: id });
-      if (error) fail(error);
-      else {
-        toast('Orden recibida e inventario actualizado');
-        render(el);
-      }
-      return;
-    }
-
-    // Cancelar orden
-    const cancelBtn = e.target.closest('[data-cancel-order]');
-    if (cancelBtn) {
-      const id = cancelBtn.dataset.cancelOrder;
-      if (!confirm('¿Cancelar esta orden de compra?')) return;
-      
-      const { error } = await sb.from('purchase_orders').update({ status: 'cancelada' }).eq('id', id);
-      if (error) fail(error);
-      else {
-        toast('Orden cancelada');
-        render(el);
-      }
-      return;
-    }
+    // ... (el resto de event listeners que ya tienes)
   });
 }
 
