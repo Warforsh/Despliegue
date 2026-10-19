@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.env
+.env.*
+# config.js local (el hosting lo genera en el build con build.js)
+config.js

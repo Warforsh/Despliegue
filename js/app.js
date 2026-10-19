@@ -74,5 +74,5 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
-sb.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT') { S.user = S.profile = null; } });
+sb?.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT') { S.user = S.profile = null; } });
 boot();
