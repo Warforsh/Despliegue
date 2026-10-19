@@ -1,482 +1,683 @@
-import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtDT, S, openModal } from './core.js';
+import {
+  sb, CFG, $, $$, esc, isRole, money, fmtDT, today, dayBounds,
+  tbl, toast, fail, audit, openModal, S
+} from './core.js';
 
+// =====================================================================
+// FACTURACIÓN Y CAJA — Centro Médico Premier
+// Lectura tolerante a fallos: un módulo opcional no debe romper la vista.
+// =====================================================================
+
+const state = {
+  invoices: [],
+  patients: [],
+  summary: [],
+  docs: {},
+  canManage: false,
+  isAdmin: false
+};
+
+// ---------- Utilidades ----------
+const num = v => Number(v || 0);
+const net = inv => Math.max(0, num(inv.total) - num(inv.refund_amount));
+
+// Compatibilidad con facturas antiguas y nuevas del sistema
+const itemConcept = it => it?.concept || it?.name || it?.description || 'Concepto';
+const itemQty = it => num(it?.qty ?? it?.quantity ?? 1) || 1;
+const itemPrice = it => num(it?.price ?? it?.unit_price ?? 0);
+const itemSubtotal = it => num(it?.subtotal) || itemQty(it) * itemPrice(it);
+
+const patientName = inv =>
+  `${inv.patient?.first_name || ''} ${inv.patient?.last_name || ''}`.trim() || 'Paciente';
+
+const statusBadge = inv => {
+  const refund = num(inv.refund_amount);
+  if (refund > 0) {
+    const full = refund >= num(inv.total);
+    return `<span class="badge ${full ? 'cancelada' : 'pendiente'}">${full ? 'reembolsada' : 'reembolso parcial'}</span>`;
+  }
+  return `<span class="badge ${inv.status === 'pagada' ? 'atendida' : 'pendiente'}">${esc(inv.status || 'pendiente')}</span>`;
+};
+
+// CSV seguro: escapa comillas y neutraliza inyección de fórmulas
+const csvCell = value => {
+  let s = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return `"${s.replace(/"/g, '""')}"`;
+};
+
+// =====================================================================
+// VISTA PRINCIPAL
+// =====================================================================
 export async function render(el) {
-  const isCashier = isRole('admin', 'cashier');
-  
-  // Cargar datos en paralelo
-  const [{ data: invoices }, { data: patients }] = await Promise.all([
-    sb.from('invoices').select(`
-      *,
-      patient:patients(first_name, last_name, dpi)
-    `).order('created_at', { ascending: false }).limit(100),
-    sb.from('patients').select('id, first_name, last_name, dpi').order('last_name')
+  state.canManage = isRole('admin', 'cashier');
+  state.isAdmin = isRole('admin');
+
+  el.innerHTML = '<p class="muted">Cargando facturas…</p>';
+
+  // 1) CONSULTA CRÍTICA: solo relaciones que SÍ existen en el schema.
+  //    NO se hace embed de documents (relación polimórfica, sin FK).
+  const { data, error } = await sb
+    .from('invoices')
+    .select('*, patient:patients(first_name, last_name, dpi)')
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (error) {
+    el.innerHTML = `
+      <div class="bar"><h2>Facturación y Caja</h2></div>
+      <div class="card">
+        <p class="bad">No se pudieron cargar las facturas.</p>
+        <p class="muted">${esc(error.message)}</p>
+        <button class="btn" id="btn-retry">Reintentar</button>
+      </div>`;
+    $('#btn-retry', el).onclick = () => render(el);
+    return fail(error);
+  }
+
+  state.invoices = data || [];
+  const ids = state.invoices.map(i => i.id);
+
+  // 2) CONSULTAS SECUNDARIAS: ninguna puede dejar la pantalla en blanco.
+  const [from, to] = dayBounds(today());
+
+  const [p, d, s] = await Promise.all([
+    state.canManage
+      ? sb.from('patients').select('id, first_name, last_name, dpi').order('last_name')
+      : Promise.resolve({ data: [], error: null }),
+
+    ids.length
+      ? sb.from('documents')
+          .select('id, entity_id, filename, file_type')
+          .eq('entity_type', 'invoice')
+          .in('entity_id', ids)
+      : Promise.resolve({ data: [], error: null }),
+
+    state.canManage
+      ? sb.from('invoices').select('*')
+          .eq('status', 'pagada')
+          .gte('created_at', from)
+          .lt('created_at', to)
+      : Promise.resolve({ data: [], error: null })
   ]);
+
+  if (p.error) {
+    // Sin catálogo de pacientes no se puede facturar, pero sí se puede leer.
+    state.patients = [];
+    console.warn('[billing] Pacientes no disponibles:', p.error.message);
+  } else {
+    state.patients = p.data || [];
+  }
+
+  // Documentos es opcional: si la tabla no existe o el rol no tiene permiso,
+  // la facturación sigue funcionando normalmente.
+  state.docs = {};
+  if (d.error) {
+    console.warn('[billing] Documentos no disponibles (opcional):', d.error.message);
+  } else {
+    for (const doc of d.data || []) {
+      if (!state.docs[doc.entity_id]) state.docs[doc.entity_id] = [];
+      state.docs[doc.entity_id].push(doc);
+    }
+  }
+
+  state.summary = s.error ? [] : (s.data || []);
+  if (s.error) console.warn('[billing] Resumen no disponible:', s.error.message);
+
+  const totalNeto = state.summary.reduce((sum, i) => sum + net(i), 0);
+  const totalCash = state.summary.filter(i => i.method === 'efectivo').reduce((sum, i) => sum + net(i), 0);
+  const totalCard = state.summary.filter(i => i.method === 'tarjeta').reduce((sum, i) => sum + net(i), 0);
 
   el.innerHTML = `
     <div class="bar">
       <h2>Facturación y Caja</h2>
-      ${isCashier ? `<button class="btn" id="btn-new-invoice">Nueva Factura</button>` : ''}
+      ${state.canManage ? '<button class="btn" id="btn-new-invoice">Nueva Factura</button>' : ''}
     </div>
 
-    <!-- Alerta de Seguridad PCI DSS -->
-    <div class="card" style="background:#e7f3ff; border-left:4px solid #2196F3; margin-bottom:1rem">
-      <h3 style="color:#0d47a1">🔒 Seguridad de Datos de Pago</h3>
-      <p class="muted">Este sistema cumple con PCI DSS. Nunca almacenamos números completos de tarjetas de crédito. Solo se registran los últimos 4 dígitos para referencia.</p>
-    </div>
+    <p class="muted">
+      Consulta y medicamentos se facturan por separado. Aquí solo se registran
+      los conceptos efectivamente prestados o dispensados.
+      ${!state.canManage ? '<br><b>Solo lectura:</b> la emisión de facturas es exclusiva de Caja y Administración.' : ''}
+    </p>
 
-    <!-- Facturas Recientes -->
+    ${state.canManage ? `
     <div class="card">
-      <h3>Facturas Recientes</h3>
-      ${tbl(['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado', 'Acciones'], (invoices || []).map(inv => [
-        esc(inv.number),
-        esc(`${inv.patient?.first_name || ''} ${inv.patient?.last_name || ''}`),
-        esc(fmtDT(inv.created_at)),
-        money(inv.total),
-        esc(inv.method || '-'),
-        `<span class="badge ${inv.status}">${esc(inv.status)}</span>`,
-        isCashier ? `
-          <button class="btn sm" data-view="${inv.id}">Ver</button>
-          ${inv.status === 'pagada' ? `<button class="btn sm bad" data-refund="${inv.id}">Reembolso</button>` : ''}
-        ` : '<span class="muted">Solo caja</span>'
-      ]))}
-    </div>
-
-    ${isCashier ? `
-    <!-- Resumen de Caja -->
-    <div class="card" style="margin-top:1rem">
-      <h3>Resumen del Día</h3>
-      <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:1rem; text-align:center;">
-        <div>
-          <div class="muted">Total Facturado</div>
-          <div style="font-size:1.5rem; font-weight:bold;">${money((invoices || []).filter(i => i.status === 'pagada' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
-        </div>
-        <div>
-          <div class="muted">Efectivo</div>
-          <div style="font-size:1.5rem; font-weight:bold; color:#4caf50;">${money((invoices || []).filter(i => i.status === 'pagada' && i.method === 'efectivo' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
-        </div>
-        <div>
-          <div class="muted">Tarjeta</div>
-          <div style="font-size:1.5rem; font-weight:bold; color:#2196F3;">${money((invoices || []).filter(i => i.status === 'pagada' && i.method === 'tarjeta' && i.created_at?.startsWith(new Date().toISOString().split('T')[0])).reduce((sum, i) => sum + Number(i.total), 0))}</div>
-        </div>
+      <h3>Resumen del día · ${esc(fmtDT(from))}</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Neto cobrado</th><th>Efectivo</th><th>Tarjeta</th></tr></thead>
+          <tbody><tr>
+            <td><strong>${money(totalNeto)}</strong></td>
+            <td>${money(totalCash)}</td>
+            <td>${money(totalCard)}</td>
+          </tr></tbody>
+        </table>
       </div>
+      <p class="muted">Importes netos de reembolsos. Solo facturas pagadas de hoy.</p>
+    </div>` : ''}
+
+    <div class="card">
+      <h3>Facturas</h3>
+      <div class="bar" style="gap:.5rem;flex-wrap:wrap">
+        <input id="f-search" type="search" placeholder="Buscar por número, nombre o DPI" style="flex:1;min-width:200px">
+        <select id="f-status">
+          <option value="todas">Todos los estados</option>
+          <option value="pagada">Pagadas</option>
+          <option value="pendiente">Pendientes</option>
+          <option value="reembolsada">Con reembolso</option>
+        </select>
+      </div>
+      <div id="invoice-table"><p class="muted">Sin resultados.</p></div>
+      <p class="muted">Se muestran las últimas 200 facturas. Usa el buscador para localizar una.</p>
     </div>
-    ` : ''}
   `;
 
-  // Event listeners
-  el.addEventListener('click', async (e) => {
-    // Nueva factura
-    if (e.target.id === 'btn-new-invoice') {
-      openInvoiceModal(patients || [], render.bind(null, el));
+  // ---------- Pintado de tabla (filtros locales) ----------
+  const paint = () => {
+    const q = ($('#f-search', el)?.value || '').trim().toLowerCase();
+    const filter = $('#f-status', el)?.value || 'todas';
+
+    const rows = state.invoices.filter(i => {
+      const hay = `${i.number || ''} ${patientName(i)} ${i.patient?.dpi || ''}`.toLowerCase();
+      const matchQ = !q || hay.includes(q);
+      const matchS =
+        filter === 'todas' ||
+        (filter === 'reembolsada' ? num(i.refund_amount) > 0 : i.status === filter);
+      return matchQ && matchS;
+    }).map(i => {
+      const canRefund = state.isAdmin && i.status === 'pagada' && net(i) > 0;
+      return [
+        esc(i.number || '—'),
+        esc(patientName(i)),
+        esc(fmtDT(i.created_at)),
+        `<strong>${money(i.total)}</strong>`,
+        esc(i.method || '—') + (i.card_last_four ? ` ····${esc(i.card_last_four)}` : ''),
+        statusBadge(i),
+        `${state.docs[i.id]?.length ? `<span class="muted">${state.docs[i.id].length} adj.</span> ` : ''}
+         <button class="btn sm" data-view="${i.id}">Ver</button>
+         ${canRefund ? `<button class="btn sm bad" data-refund="${i.id}">Reembolso</button>` : ''}`
+      ];
+    });
+
+    $('#invoice-table', el).innerHTML = tbl(
+      ['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado', 'Acciones'],
+      rows
+    );
+  };
+
+  // Asignación (no addEventListener): evita listeners duplicados al re-renderizar.
+  el.oninput = e => { if (e.target.id === 'f-search') paint(); };
+  el.onchange = e => { if (e.target.id === 'f-status') paint(); };
+
+  el.onclick = e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+
+    if (b.id === 'btn-new-invoice') {
+      openInvoiceModal(() => render(el));
       return;
     }
 
-    // Ver factura
-    const viewBtn = e.target.closest('[data-view]');
-    if (viewBtn) {
-      const id = viewBtn.dataset.view;
-      const invoice = invoices.find(i => i.id === id);
-      if (invoice) {
-        // Cargar datos completos de la factura
-        const { data: fullInvoice, error } = await sb
-          .from('invoices')
-          .select(`
-            *,
-            patient:patients(first_name, last_name, dpi, phone, email)
-          `)
-          .eq('id', id)
-          .single();
-
-        if (error) {
-          fail(error);
-          return;
-        }
-
-        openInvoiceDetailModal(fullInvoice);
-      }
+    if (b.dataset.view) {
+      const inv = state.invoices.find(x => x.id === b.dataset.view);
+      if (!inv) return toast('Factura no encontrada. Recarga la vista.', true);
+      openDetail(inv);
       return;
     }
 
-    // Reembolso
-    const refundBtn = e.target.closest('[data-refund]');
-    if (refundBtn) {
-      const id = refundBtn.dataset.refund;
-      openRefundModal(id, render.bind(null, el));
-      return;
+    if (b.dataset.refund) {
+      openRefund(b.dataset.refund, () => render(el));
     }
-  });
+  };
+
+  paint();
 }
 
-function openInvoiceModal(patients, onClose) {
+// =====================================================================
+// DETALLE DE FACTURA (modal)
+// =====================================================================
+function openDetail(inv) {
+  const items = Array.isArray(inv.items) ? inv.items : [];
+  const docs = state.docs[inv.id] || [];
+  const refund = num(inv.refund_amount);
+
+  const { el, close } = openModal(`Factura ${inv.number || ''}`, `
+    <div style="display:grid;gap:.75rem">
+      <div><b>Paciente:</b> ${esc(patientName(inv))}</div>
+      ${inv.patient?.dpi ? `<div><b>DPI:</b> ${esc(inv.patient.dpi)}</div>` : ''}
+      <div><b>Fecha:</b> ${esc(fmtDT(inv.created_at))}</div>
+      <div><b>Estado:</b> ${statusBadge(inv)}</div>
+      <div><b>Método:</b> ${esc(inv.method || 'Sin definir')}
+        ${inv.card_last_four ? ` · terminada en <b>${esc(inv.card_last_four)}</b>` : ''}
+      </div>
+
+      ${refund > 0 ? `
+      <div class="card" style="border-left:4px solid #c62828">
+        <b>Reembolso registrado:</b> ${money(refund)}
+        <p class="muted">${esc(inv.refund_reason || 'Sin motivo registrado')}</p>
+        <p class="muted">Fecha: ${esc(fmtDT(inv.refunded_at))}</p>
+      </div>` : ''}
+
+      <div>
+        <b>Conceptos</b>
+        ${items.length ? `
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Concepto</th><th>Cant.</th><th>Precio</th><th>Subtotal</th></tr></thead>
+            <tbody>
+              ${items.map(it => `
+                <tr>
+                  <td>${esc(itemConcept(it))}</td>
+                  <td>${esc(itemQty(it))}</td>
+                  <td>${money(itemPrice(it))}</td>
+                  <td>${money(itemSubtotal(it))}</td>
+                </tr>`).join('')}
+            </tbody>
+            <tfoot>
+              <tr><td colspan="3" style="text-align:right"><b>TOTAL</b></td>
+                  <td><b>${money(inv.total)}</b></td></tr>
+              ${refund > 0 ? `<tr><td colspan="3" style="text-align:right">Neto después de reembolso</td>
+                  <td><b>${money(net(inv))}</b></td></tr>` : ''}
+            </tfoot>
+          </table>
+        </div>` : '<p class="muted">Sin conceptos detallados.</p>'}
+      </div>
+
+      ${docs.length ? `
+      <div>
+        <b>Documentos asociados</b>
+        <p class="muted">${docs.map(d => esc(d.filename)).join(' · ')}</p>
+      </div>` : ''}
+
+      <div class="bar" style="justify-content:flex-end;gap:.5rem">
+        <button class="btn sm" id="d-csv">Descargar CSV</button>
+        <button class="btn sm" id="d-close">Cerrar</button>
+      </div>
+    </div>
+  `);
+
+  // Sin onclick inline: compatible con cabeceras CSP estrictas.
+  $('#d-close', el).onclick = close;
+
+  $('#d-csv', el).onclick = async () => {
+    const rows = [
+      ['Centro Médico Premier'],
+      ['Documento confidencial - uso interno'],
+      ['Factura', inv.number || ''],
+      ['Paciente', patientName(inv)],
+      ['Generado por', S.profile?.full_name || S.user?.id || ''],
+      ['Generado el', new Date().toISOString()],
+      ['Factura ID', inv.id],
+      [],
+      ['Concepto', 'Cantidad', 'Precio', 'Subtotal'],
+      ...items.map(it => [itemConcept(it), itemQty(it), itemPrice(it).toFixed(2), itemSubtotal(it).toFixed(2)]),
+      [],
+      ['TOTAL', '', '', num(inv.total).toFixed(2)],
+      ['Reembolso', '', '', refund.toFixed(2)],
+      ['NETO', '', '', net(inv).toFixed(2)]
+    ];
+
+    const csv = '\uFEFF' + rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(inv.number || 'factura').replace(/[^a-zA-Z0-9_-]/g, '_')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    // Trazabilidad: la exportación también se audita.
+    try {
+      await audit('export_invoice', 'invoices', inv.id, {
+        format: 'csv', rows: items.length, total: String(inv.total)
+      });
+    } catch (_) { /* la descarga no debe fallar por auditoría */ }
+
+    toast('CSV descargado con metadatos de auditoría');
+  };
+}
+
+// =====================================================================
+// NUEVA FACTURA (conceptos dinámicos, sin JSON)
+// =====================================================================
+function openInvoiceModal(onClose) {
+  const fee = Number(CFG.CONSULTATION_FEE || 150);
+
   const { el, close } = openModal('Nueva Factura', `
-    <form id="invoice-form" style="display:grid; gap:0.75rem;">
+    <form id="inv-form" style="display:grid;gap:.75rem" novalidate>
       <div>
         <label>Paciente</label>
-        <select name="patient_id" required style="width:100%">
-          <option value="">Seleccionar paciente...</option>
-          ${patients.map(p => `<option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)} - DPI: ${esc(p.dpi)}</option>`).join('')}
+        <select name="patient_id" required>
+          <option value="">Seleccionar paciente…</option>
+          ${state.patients.map(p => `
+            <option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)} · DPI ${esc(p.dpi)}</option>
+          `).join('')}
         </select>
       </div>
 
-      <!-- Sección de conceptos facturables automáticos -->
-      <div id="billable-section" style="display:none;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-          <h4 style="margin:0;">Conceptos pendientes de facturar</h4>
-          <button type="button" class="btn sm" id="btn-load-billable">Cargar pendientes</button>
+      <div id="pending-box" style="display:none">
+        <div class="bar">
+          <b>Conceptos pendientes</b>
+          <button type="button" class="btn sm" id="btn-load">Cargar pendientes</button>
         </div>
-        <div id="billable-list" class="muted">Seleccione un paciente y presione "Cargar pendientes"</div>
+        <div id="pending-list" class="muted">Presiona "Cargar pendientes".</div>
       </div>
 
-      <!-- Líneas de conceptos dinámicas -->
       <div>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-          <h4 style="margin:0;">Conceptos de la factura</h4>
+        <div class="bar">
+          <b>Conceptos de la factura</b>
           <button type="button" class="btn sm" id="btn-add-line">+ Agregar línea</button>
         </div>
-        <div id="lines-container"></div>
-        <div style="display:flex; justify-content:flex-end; margin-top:0.5rem; font-size:1.2rem;">
-          <strong>Total: <span id="invoice-total">Q0.00</span></strong>
-        </div>
+        <div id="lines"></div>
+        <p style="text-align:right"><b>Total: <span id="inv-total">Q0.00</span></b></p>
       </div>
 
       <div>
-        <label>Método de Pago</label>
-        <select name="method" required style="width:100%">
+        <label>Método de pago</label>
+        <select name="method" required>
           <option value="efectivo">Efectivo</option>
           <option value="tarjeta">Tarjeta</option>
         </select>
       </div>
-      <div id="card-fields" style="display:none;">
-        <label>Últimos 4 dígitos de tarjeta (solo referencia)</label>
-        <input type="text" name="card_last_four" maxlength="4" pattern="[0-9]{4}" placeholder="1234" style="width:100%">
-        <small class="muted">Por seguridad (PCI DSS), solo registramos los últimos 4 dígitos</small>
+
+      <div id="card-box" style="display:none">
+        <label>Últimos 4 dígitos (referencia)</label>
+        <input name="card_last_four" inputmode="numeric" maxlength="4"
+               pattern="[0-9]{4}" placeholder="1234" autocomplete="off">
+        <p class="muted">Nunca ingreses el número completo de la tarjeta.</p>
       </div>
-      <button type="submit" class="btn">Crear Factura</button>
+
+      <button class="btn" id="inv-submit" type="submit">Crear Factura</button>
     </form>
   `);
 
-  // --- Estado interno ---
   let lines = [];
-  let billableData = null;
-  let consultationIds = [];
-  let prescriptionIds = [];
+  let pending = null;
+  let consultationIds = new Set();
+  let prescriptionIds = new Set();
+  let saving = false;
 
-  const linesContainer = $('#lines-container', el);
-  const totalSpan = $('#invoice-total', el);
-  const billableSection = $('#billable-section', el);
-  const billableList = $('#billable-list', el);
+  const linesEl = $('#lines', el);
+  const totalEl = $('#inv-total', el);
+  const submitBtn = $('#inv-submit', el);
 
-  function renderLines() {
-    if (lines.length === 0) {
-      linesContainer.innerHTML = '<p class="muted">Sin conceptos. Agregue una línea o cargue pendientes.</p>';
-    } else {
-      linesContainer.innerHTML = lines.map((line, idx) => `
-        <div style="display:grid; grid-template-columns: 3fr 1fr 1fr auto; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
-          <input type="text" value="${esc(line.concept)}" data-idx="${idx}" data-field="concept" placeholder="Concepto" style="width:100%" required>
-          <input type="number" value="${line.qty}" data-idx="${idx}" data-field="qty" min="1" step="1" style="width:100%" required>
-          <input type="number" value="${line.price}" data-idx="${idx}" data-field="price" min="0" step="0.01" style="width:100%" required>
-          <button type="button" class="btn sm bad" data-remove="${idx}">✕</button>
-        </div>
-      `).join('');
-    }
-    updateTotal();
-  }
+  const paintLines = () => {
+    linesEl.innerHTML = lines.length
+      ? lines.map((l, i) => `
+        <div class="bar" style="gap:.4rem;flex-wrap:wrap">
+          <input data-i="${i}" data-f="concept" value="${esc(l.concept)}"
+                 placeholder="Concepto" style="flex:2;min-width:160px" required>
+          <input data-i="${i}" data-f="qty" type="number" min="1" step="1"
+                 value="${esc(l.qty)}" style="flex:.5;min-width:60px" required>
+          <input data-i="${i}" data-f="price" type="number" min="0" step="0.01"
+                 value="${esc(l.price)}" style="flex:.7;min-width:80px" required>
+          <button type="button" class="btn sm bad" data-del="${i}">✕</button>
+        </div>`).join('')
+      : '<p class="muted">Sin conceptos. Carga pendientes o agrega una línea.</p>';
 
-  function updateTotal() {
-    const total = lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.price)), 0);
-    totalSpan.textContent = 'Q' + total.toFixed(2);
-  }
-
-  $('[name="patient_id"]', el).onchange = (e) => {
-    billableSection.style.display = e.target.value ? 'block' : 'none';
-    billableList.innerHTML = '<span class="muted">Presione "Cargar pendientes"</span>';
-    billableData = null;
+    totalEl.textContent = money(lines.reduce((s, l) => s + num(l.qty) * num(l.price), 0));
   };
 
-  $('#btn-load-billable', el).onclick = async () => {
-    const patientId = $('[name="patient_id"]', el).value;
-    if (!patientId) return;
+  // Cambiar de paciente limpia todo: evita mezclar conceptos de dos personas.
+  $('[name="patient_id"]', el).onchange = e => {
+    pending = null;
+    consultationIds = new Set();
+    prescriptionIds = new Set();
+    lines = [];
+    $('#pending-box', el).style.display = e.target.value ? 'block' : 'none';
+    $('#pending-list', el).innerHTML = 'Presiona "Cargar pendientes".';
+    paintLines();
+  };
 
-    billableList.innerHTML = '<span class="muted">Cargando...</span>';
-    const { data, error } = await sb.rpc('billable_items', { p_patient: patientId });
-    if (error) {
-      fail(error);
-      billableList.innerHTML = '<span class="muted">Error al cargar</span>';
-      return;
-    }
-
-    billableData = data;
-    const consultations = data?.consultations || [];
-    const prescriptions = data?.prescriptions || [];
-
-    if (consultations.length === 0 && prescriptions.length === 0) {
-      billableList.innerHTML = '<span class="muted">Este paciente no tiene conceptos pendientes de facturar.</span>';
-      return;
-    }
-
-    const consultationFee = window.APP_CONFIG?.CONSULTATION_FEE || 150;
-
-    let html = '<div style="display:grid; gap:0.5rem;">';
-    if (consultations.length > 0) {
-      html += `<div><strong>Consultas médicas:</strong></div>`;
-      html += consultations.map((c) => `
-        <label style="display:flex; gap:0.5rem; align-items:center; padding:0.25rem; background:#f5f5f5; border-radius:4px;">
-          <input type="checkbox" data-type="consultation" data-id="${c.id}" data-price="${consultationFee}" data-name="Consulta médica - ${esc(c.doctor)} (${esc(c.date?.split('T')[0] || '')})">
-          <span>${esc(c.doctor)} — ${esc(new Date(c.date).toLocaleDateString('es-GT'))} — <strong>Q${Number(consultationFee).toFixed(2)}</strong></span>
-        </label>
-      `).join('');
-    }
-    if (prescriptions.length > 0) {
-      html += `<div style="margin-top:0.5rem;"><strong>Recetas dispensadas:</strong></div>`;
-      html += prescriptions.map((r) => `
-        <div style="padding:0.25rem; background:#f5f5f5; border-radius:4px;">
-          <label style="display:flex; gap:0.5rem; align-items:center;">
-            <input type="checkbox" data-type="prescription" data-id="${r.id}">
-            <span>Receta ${esc(new Date(r.date).toLocaleDateString('es-GT'))}</span>
-          </label>
-          <div style="margin-left:1.5rem; font-size:0.9em;">
-            ${(r.items || []).map(it => `${esc(it.name)} x${it.qty} — Q${(Number(it.qty) * Number(it.price)).toFixed(2)}`).join('<br>')}
-          </div>
-        </div>
-      `).join('');
-    }
-    html += `<button type="button" class="btn sm" id="btn-add-selected" style="margin-top:0.5rem;">Agregar seleccionados a la factura</button>`;
-    html += '</div>';
-    billableList.innerHTML = html;
-
-    $('#btn-add-selected', el).onclick = () => {
-      const selectedConsultations = $$('input[data-type="consultation"]:checked', el);
-      const selectedPrescriptions = $$('input[data-type="prescription"]:checked', el);
-
-      selectedConsultations.forEach(cb => {
-        lines.push({
-          concept: cb.dataset.name,
-          qty: 1,
-          price: Number(cb.dataset.price)
-        });
-        consultationIds.push(cb.dataset.id);
-      });
-
-      selectedPrescriptions.forEach(cb => {
-        const rx = billableData.prescriptions.find(p => p.id === cb.dataset.id);
-        if (rx) {
-          (rx.items || []).forEach(it => {
-            lines.push({
-              concept: `${it.name} (${rx.date?.split('T')[0] || ''})`,
-              qty: it.qty,
-              price: Number(it.price)
-            });
-          });
-          prescriptionIds.push(rx.id);
-        }
-      });
-
-      renderLines();
-      toast(`${selectedConsultations.length + selectedPrescriptions.length} concepto(s) agregado(s)`);
-    };
+  $('[name="method"]', el).onchange = e => {
+    $('#card-box', el).style.display = e.target.value === 'tarjeta' ? 'block' : 'none';
   };
 
   $('#btn-add-line', el).onclick = () => {
     lines.push({ concept: '', qty: 1, price: 0 });
-    renderLines();
+    paintLines();
   };
 
-  linesContainer.addEventListener('input', (e) => {
-    const idx = e.target.dataset.idx;
-    const field = e.target.dataset.field;
-    if (idx !== undefined && field) {
-      lines[idx][field] = field === 'concept' ? e.target.value : Number(e.target.value);
-      updateTotal();
-    }
-  });
-  linesContainer.addEventListener('click', (e) => {
-    const idx = e.target.dataset.remove;
-    if (idx !== undefined) {
-      lines.splice(Number(idx), 1);
-      renderLines();
-    }
-  });
-
-  $('[name="method"]', el).onchange = (e) => {
-    $('#card-fields', el).style.display = e.target.value === 'tarjeta' ? 'block' : 'none';
+  linesEl.oninput = e => {
+    const i = e.target.dataset.i, f = e.target.dataset.f;
+    if (i === undefined || !f) return;
+    lines[Number(i)][f] = f === 'concept' ? e.target.value : num(e.target.value);
+    totalEl.textContent = money(lines.reduce((s, l) => s + num(l.qty) * num(l.price), 0));
   };
 
-  $('#invoice-form', el).onsubmit = async (e) => {
-    e.preventDefault();
-    
-    if (lines.length === 0) {
-      fail('Debe agregar al menos un concepto a la factura');
+  linesEl.onclick = e => {
+    const i = e.target.dataset.del;
+    if (i === undefined) return;
+    lines.splice(Number(i), 1);
+    paintLines();
+  };
+
+  // Aprovecha la RPC existente: NO expone datos clínicos al cajero.
+  $('#btn-load', el).onclick = async () => {
+    const patientId = $('[name="patient_id"]', el).value;
+    if (!patientId) return toast('Selecciona un paciente.', true);
+
+    const list = $('#pending-list', el);
+    list.innerHTML = '<p class="muted">Cargando…</p>';
+
+    const { data, error } = await sb.rpc('billable_items', { p_patient: patientId });
+    if (error) {
+      list.innerHTML = '';
+      return fail(error);
+    }
+
+    pending = data || { consultations: [], prescriptions: [] };
+    const cs = pending.consultations || [];
+    const ps = pending.prescriptions || [];
+
+    if (!cs.length && !ps.length) {
+      list.innerHTML = '<p class="muted">Este paciente no tiene conceptos pendientes.</p>';
       return;
     }
 
-    const formData = new FormData(e.target);
-    const method = formData.get('method');
-    const total = lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.price)), 0);
+    list.innerHTML = `
+      ${cs.length ? `<p><b>Consultas médicas</b></p>${cs.map(c => `
+        <label class="bar" style="gap:.5rem">
+          <input type="checkbox" data-kind="c" data-id="${c.id}">
+          <span>${esc(c.doctor || 'Médico')} · ${esc(fmtDT(c.date))} · <b>${money(fee)}</b></span>
+        </label>`).join('')}` : ''}
 
-    let payload = {
-      patient_id: formData.get('patient_id'),
-      consultation_id: consultationIds[0] || null,
-      prescription_ids: prescriptionIds,
-      items: lines.map(l => ({ concept: l.concept, qty: l.qty, price: l.price, subtotal: l.qty * l.price })),
-      total: total,
-      method: method,
-      status: 'pagada',
-      paid_at: new Date().toISOString()
-    };
+      ${ps.length ? `<p><b>Recetas dispensadas</b></p>${ps.map(r => `
+        <label class="bar" style="gap:.5rem">
+          <input type="checkbox" data-kind="p" data-id="${r.id}">
+          <span>Receta · ${esc(fmtDT(r.date))}</span>
+        </label>
+        <p class="muted">${(r.items || []).map(it =>
+          `${esc(it.name)} × ${esc(it.qty)} · ${money(num(it.qty) * num(it.price))}`
+        ).join('<br>')}</p>`).join('')}` : ''}
 
-    if (method === 'tarjeta') {
-      const cardLastFour = formData.get('card_last_four');
-      if (!cardLastFour || !/^[0-9]{4}$/.test(cardLastFour)) {
-        fail('Debe ingresar los últimos 4 dígitos de la tarjeta');
-        return;
+      <button type="button" class="btn sm" id="btn-attach">Agregar seleccionados</button>
+    `;
+
+    $('#btn-attach', el).onclick = () => {
+      const pickedC = $$('input[data-kind="c"]:checked', el);
+      const pickedP = $$('input[data-kind="p"]:checked', el);
+
+      if (!pickedC.length && !pickedP.length) return toast('Selecciona al menos un concepto.', true);
+
+      // El schema actual permite UNA consulta por factura (consultation_id uuid).
+      if (pickedC.length > 1) {
+        pickedC.slice(1).forEach(cb => { cb.checked = false; });
+        toast('Una consulta por factura. Emite facturas separadas para las demás.', true);
       }
-      payload.card_last_four = cardLastFour;
+
+      pickedC.forEach(cb => {
+        const id = cb.dataset.id;
+        if (consultationIds.has(id)) return;
+        consultationIds.add(id);
+        lines.push({ concept: `Consulta médica · ${fmtDT(cs.find(c => c.id === id)?.date)}`, qty: 1, price: fee });
+      });
+
+      pickedP.forEach(cb => {
+        const id = cb.dataset.id;
+        if (prescriptionIds.has(id)) return;
+        const rx = ps.find(r => r.id === id);
+        if (!rx) return;
+        prescriptionIds.add(id);
+        (rx.items || []).forEach(it => {
+          lines.push({
+            concept: `${it.name} · receta ${fmtDT(rx.date)}`,
+            qty: itemQty(it),
+            price: itemPrice(it)
+          });
+        });
+      });
+
+      paintLines();
+      toast('Conceptos agregados. Revisa el total antes de crear.');
+    };
+  };
+
+  $('#inv-form', el).onsubmit = async e => {
+    e.preventDefault();
+    if (saving) return;
+
+    const fd = new FormData(e.target);
+    const patientId = fd.get('patient_id');
+    const method = fd.get('method');
+
+    if (!patientId) return fail('Selecciona un paciente.');
+    if (!lines.length) return fail('Agrega al menos un concepto.');
+
+    const clean = lines.map(l => ({
+      concept: String(l.concept || '').trim(),
+      qty: Math.trunc(num(l.qty)),
+      price: Math.round(num(l.price) * 100) / 100
+    }));
+
+    if (clean.some(l => !l.concept)) return fail('Cada concepto necesita un nombre.');
+    if (clean.some(l => l.qty < 1 || l.price < 0 || !Number.isFinite(l.price))) {
+      return fail('Revisa cantidades y precios de los conceptos.');
     }
 
-    const { error } = await sb.from('invoices').insert(payload);
-    if (error) {
-      fail(error);
-    } else {
-      toast('Factura creada exitosamente');
+    const total = Math.round(clean.reduce((s, l) => s + l.qty * l.price, 0) * 100) / 100;
+    if (total <= 0) return fail('El total debe ser mayor que cero.');
+
+    let card = null;
+    if (method === 'tarjeta') {
+      card = String(fd.get('card_last_four') || '').trim();
+      if (!/^[0-9]{4}$/.test(card)) return fail('Ingresa exactamente los últimos 4 dígitos de la tarjeta.');
+    }
+
+    // Revalida en servidor que los conceptos siguen sin facturar.
+    if (consultationIds.size || prescriptionIds.size) {
+      const { data: fresh, error } = await sb.rpc('billable_items', { p_patient: patientId });
+      if (error) return fail(error);
+
+      const okC = new Set((fresh?.consultations || []).map(x => x.id));
+      const okP = new Set((fresh?.prescriptions || []).map(x => x.id));
+
+      const stale =
+        [...consultationIds].some(id => !okC.has(id)) ||
+        [...prescriptionIds].some(id => !okP.has(id));
+
+      if (stale) return fail('Algunos conceptos ya fueron facturados. Vuelve a cargar los pendientes.');
+    }
+
+    saving = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Guardando…';
+
+    try {
+      const { error } = await sb.from('invoices').insert({
+        patient_id: patientId,
+        consultation_id: [...consultationIds][0] || null,
+        prescription_ids: [...prescriptionIds],
+        items: clean.map(l => ({
+          concept: l.concept, qty: l.qty, price: l.price,
+          subtotal: Math.round(l.qty * l.price * 100) / 100
+        })),
+        total,
+        method,
+        card_last_four: card,
+        status: 'pagada',
+        paid_at: new Date().toISOString()
+        // created_by lo aporta auth.uid() por defecto en la BD.
+      });
+
+      if (error) throw error;
+
+      toast('Factura creada correctamente');
       close();
-      onClose();
+      await onClose();
+    } catch (err) {
+      fail(err);
+    } finally {
+      saving = false;
+      if (submitBtn.isConnected) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Crear Factura';
+      }
     }
   };
 
-  renderLines();
+  paintLines();
 }
 
-function openInvoiceDetailModal(invoice) {
-  const items = invoice.items || [];
-  
-  const { el, close } = openModal(`Factura ${invoice.number}`, `
-    <div style="display:grid; gap:0.75rem; max-height:80vh; overflow-y:auto;">
-      <div style="background:#f5f5f5; padding:1rem; border-radius:8px;">
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
-          <div>
-            <div class="muted" style="font-size:0.85rem;">Número de Factura</div>
-            <div style="font-size:1.2rem; font-weight:bold;">${esc(invoice.number)}</div>
-          </div>
-          <div>
-            <div class="muted" style="font-size:0.85rem;">Fecha de Emisión</div>
-            <div>${esc(fmtDT(invoice.created_at))}</div>
-          </div>
-        </div>
-      </div>
+// =====================================================================
+// REEMBOLSO DOCUMENTADO (solo admin)
+// =====================================================================
+function openRefund(id, onClose) {
+  const inv = state.invoices.find(i => i.id === id);
+  if (!inv) return toast('Factura no encontrada.', true);
+
+  const remaining = net(inv);
+
+  const { el, close } = openModal(`Reembolso · ${inv.number || ''}`, `
+    <form id="refund-form" style="display:grid;gap:.75rem">
+      <p class="muted">Total: <b>${money(inv.total)}</b> · Disponible a reembolsar: <b>${money(remaining)}</b></p>
+      <p class="muted">Confirma que el dinero ya fue devuelto al paciente. Esta acción queda auditada.</p>
 
       <div>
-        <h4 style="margin:0 0 0.5rem 0;">Datos del Paciente</h4>
-        <div style="background:#e7f3ff; padding:0.75rem; border-radius:4px;">
-          <div><strong>Nombre:</strong> ${esc(invoice.patient?.first_name || '')} ${esc(invoice.patient?.last_name || '')}</div>
-          <div><strong>DPI:</strong> ${esc(invoice.patient?.dpi || '-')}</div>
-          ${invoice.patient?.phone ? `<div><strong>Teléfono:</strong> ${esc(invoice.patient.phone)}</div>` : ''}
-          ${invoice.patient?.email ? `<div><strong>Email:</strong> ${esc(invoice.patient.email)}</div>` : ''}
-        </div>
-      </div>
-
-      <div>
-        <h4 style="margin:0 0 0.5rem 0;">Detalle de la Factura</h4>
-        <table style="width:100%; border-collapse:collapse;">
-          <thead>
-            <tr style="background:#f5f5f5; border-bottom:2px solid #ddd;">
-              <th style="text-align:left; padding:0.5rem;">Concepto</th>
-              <th style="text-align:center; padding:0.5rem;">Cant.</th>
-              <th style="text-align:right; padding:0.5rem;">Precio Unit.</th>
-              <th style="text-align:right; padding:0.5rem;">Subtotal</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.length > 0 ? items.map(it => `
-              <tr style="border-bottom:1px solid #e0e0e0;">
-                <td style="padding:0.5rem;">${esc(it.concept || '-')}</td>
-                <td style="padding:0.5rem; text-align:center;">${esc(it.qty || 1)}</td>
-                <td style="padding:0.5rem; text-align:right;">${money(it.price || 0)}</td>
-                <td style="padding:0.5rem; text-align:right;">${money(it.subtotal || (it.qty || 1) * (it.price || 0))}</td>
-              </tr>
-            `).join('') : '<tr><td colspan="4" style="padding:1rem; text-align:center;" class="muted">Sin conceptos</td></tr>'}
-          </tbody>
-          <tfoot>
-            <tr style="background:#f5f5f5; font-weight:bold; font-size:1.1rem;">
-              <td colspan="3" style="padding:0.75rem; text-align:right;">TOTAL:</td>
-              <td style="padding:0.75rem; text-align:right; color:#2e7d32;">${money(invoice.total)}</td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
-        <div>
-          <div class="muted" style="font-size:0.85rem;">Método de Pago</div>
-          <div><strong>${esc(invoice.method || '-')}</strong></div>
-        </div>
-        <div>
-          <div class="muted" style="font-size:0.85rem;">Estado</div>
-          <div><span class="badge ${invoice.status}">${esc(invoice.status)}</span></div>
-        </div>
-      </div>
-
-      ${invoice.card_last_four ? `
-      <div style="background:#fff3cd; padding:0.75rem; border-radius:4px; border-left:4px solid #ffc107;">
-        <div class="muted" style="font-size:0.85rem;">Tarjeta de Crédito</div>
-        <div><strong>****-****-****-${esc(invoice.card_last_four)}</strong></div>
-      </div>
-      ` : ''}
-
-      ${invoice.refund_amount > 0 ? `
-      <div style="background:#ffebee; padding:0.75rem; border-radius:4px; border-left:4px solid #f44336;">
-        <h4 style="margin:0 0 0.5rem 0; color:#c62828;">Reembolso Procesado</h4>
-        <div><strong>Monto:</strong> ${money(invoice.refund_amount)}</div>
-        <div><strong>Razón:</strong> ${esc(invoice.refund_reason || '-')}</div>
-        <div><strong>Fecha:</strong> ${esc(fmtDT(invoice.refunded_at))}</div>
-      </div>
-      ` : ''}
-
-      ${invoice.paid_at ? `
-      <div class="muted" style="font-size:0.85rem; text-align:right;">
-        Pagado el: ${esc(fmtDT(invoice.paid_at))}
-      </div>
-      ` : ''}
-
-      <button class="btn" onclick="this.closest('.overlay').remove()">Cerrar</button>
-    </div>
-  `);
-}
-
-function openRefundModal(invoiceId, onClose) {
-  const { el, close } = openModal('Procesar Reembolso', `
-    <form id="refund-form" style="display:grid; gap:0.75rem;">
-      <div style="background:#fff3cd; padding:0.75rem; border-radius:4px; border-left:4px solid #ffc107;">
-        <strong>⚠️ Atención:</strong> Esta acción registrará un reembolso en el sistema. Asegúrese de devolver el dinero al paciente antes de confirmar.
+        <label>Monto a reembolsar (acumulado)</label>
+        <input name="amount" type="number" step="0.01" min="0.01" max="${remaining}"
+               value="${remaining}" required>
       </div>
       <div>
-        <label>Monto del Reembolso (Q)</label>
-        <input type="number" name="refund_amount" step="0.01" min="0" required style="width:100%">
+        <label>Motivo del reembolso</label>
+        <textarea name="reason" rows="3" required minlength="5"
+                  placeholder="Describe el motivo de forma documentada"></textarea>
       </div>
-      <div>
-        <label>Razón del Reembolso</label>
-        <textarea name="refund_reason" rows="3" required placeholder="Ej: Error en diagnóstico, servicio no prestado, etc." style="width:100%"></textarea>
-      </div>
-      <button type="submit" class="btn bad">Confirmar Reembolso</button>
+      <button class="btn bad" type="submit">Confirmar reembolso</button>
     </form>
   `);
 
-  $('#refund-form', el).onsubmit = async (e) => {
+  $('#refund-form', el).onsubmit = async e => {
     e.preventDefault();
-    const formData = new FormData(e.target);
-    
-    const { error } = await sb.from('invoices').update({
-      refund_amount: parseFloat(formData.get('refund_amount')),
-      refund_reason: formData.get('refund_reason'),
-      refunded_at: new Date().toISOString(),
-      refunded_by: S.user.id
-    }).eq('id', invoiceId);
+    const fd = new FormData(e.target);
+    const amount = Math.round(num(fd.get('amount')) * 100) / 100;
+    const reason = String(fd.get('reason') || '').trim();
 
-    if (error) {
-      fail(error);
-    } else {
-      toast('Reembolso procesado exitosamente');
+    if (!(amount > 0) || amount > remaining) {
+      return fail(`El monto debe estar entre 0.01 y ${money(remaining)}.`);
+    }
+    if (reason.length < 5) return fail('Registra un motivo legible del reembolso.');
+
+    const btn = $('button[type="submit"]', el);
+    btn.disabled = true;
+
+    try {
+      const { error } = await sb.from('invoices').update({
+        refund_amount: num(inv.refund_amount) + amount,
+        refund_reason: reason,
+        refunded_at: new Date().toISOString()
+        // refunded_by lo firma el trigger stamp_refund con auth.uid().
+      }).eq('id', id);
+
+      if (error) throw error;
+
+      toast('Reembolso registrado y auditado');
       close();
-      onClose();
+      await onClose();
+    } catch (err) {
+      fail(err);
+      btn.disabled = false;
     }
   };
 }
