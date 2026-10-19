@@ -1,5 +1,37 @@
 import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtD, fmtDT, S, openModal } from './core.js';
 
+// Cargar librerías dinámicamente solo cuando se necesiten
+async function loadSheetJS() {
+  if (window.XLSX) return window.XLSX;
+  const script = document.createElement('script');
+  script.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js';
+  document.head.appendChild(script);
+  return new Promise((resolve) => {
+    script.onload = () => resolve(window.XLSX);
+  });
+}
+
+async function loadJsPDF() {
+  if (window.jspdf) return window.jspdf;
+  
+  const scripts = [
+    'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js'
+  ];
+  
+  for (const src of scripts) {
+    if (!document.querySelector(`script[src="${src}"]`)) {
+      const script = document.createElement('script');
+      script.src = src;
+      document.head.appendChild(script);
+      await new Promise(resolve => {
+        script.onload = resolve;
+      });
+    }
+  }
+  return window.jspdf;
+}
+
 export async function render(el) {
   const isAdmin = isRole('admin');
   const isDoctor = isRole('doctor');
@@ -65,7 +97,7 @@ export async function render(el) {
     const card = e.target.closest('.report-card');
     if (card) {
       const type = card.dataset.type;
-      openReportConfigModal(type, doctors?.data || [], render.bind(null, el));
+      openReportConfigModal(type, doctors?.data || [], el);
       return;
     }
 
@@ -86,7 +118,7 @@ export async function render(el) {
   });
 }
 
-function openReportConfigModal(type, doctors, onClose) {
+function openReportConfigModal(type, doctors, parentEl) {
   const titles = {
     financial: 'Reporte Financiero',
     clinical: 'Reporte Clínico',
@@ -123,7 +155,9 @@ function openReportConfigModal(type, doctors, onClose) {
       <div>
         <label>Formato de Exportación</label>
         <select name="format" required style="width:100%">
-          <option value="csv">CSV (Excel)</option>
+          <option value="csv">CSV (Datos tabulares)</option>
+          <option value="xlsx">XLSX (Excel)</option>
+          <option value="pdf">PDF (Documento)</option>
         </select>
       </div>
       <button type="submit" class="btn">Generar Reporte</button>
@@ -219,8 +253,12 @@ function openReportConfigModal(type, doctors, onClose) {
 
       toast(`Reporte generado: ${report.row_count} registros`);
       close();
+      
+      // Refrescar la vista principal para mostrar el nuevo reporte en el historial
+      render(parentEl);
+      
+      // Abrir vista previa inmediatamente
       openReportPreview(report);
-      onClose();
     } catch (err) {
       fail(err);
     }
@@ -335,7 +373,7 @@ function openReportPreview(report) {
       </div>
       ${contentHtml}
       <div class="bar" style="justify-content:flex-end; gap:0.5rem;">
-        <button class="btn sm" id="preview-download">Descargar CSV</button>
+        <button class="btn sm" id="preview-download">Descargar ${report.file_format.toUpperCase()}</button>
         <button class="btn sm" id="preview-close">Cerrar</button>
       </div>
     </div>
@@ -345,13 +383,31 @@ function openReportPreview(report) {
   $('#preview-download', el).onclick = () => downloadReport(report);
 }
 
-function downloadReport(report) {
+async function downloadReport(report) {
   const data = report.metadata?.data;
   if (!data) {
     toast('Este reporte no tiene datos disponibles', true);
     return;
   }
 
+  const format = report.file_format;
+  const filename = `reporte_${report.report_type}_${report.metadata?.filters?.from}_a_${report.metadata?.filters?.to}`;
+
+  try {
+    if (format === 'csv') {
+      downloadCSV(report, data, filename);
+    } else if (format === 'xlsx') {
+      await downloadXLSX(report, data, filename);
+    } else if (format === 'pdf') {
+      await downloadPDF(report, data, filename);
+    }
+    toast(`Reporte ${format.toUpperCase()} descargado con marca de agua y metadatos de auditoría`);
+  } catch (err) {
+    fail(err);
+  }
+}
+
+function downloadCSV(report, data, filename) {
   let rows = [];
   
   rows.push(['Centro Médico Premier']);
@@ -430,11 +486,265 @@ function downloadReport(report) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `reporte_${report.report_type}_${report.metadata?.filters?.from}_a_${report.metadata?.filters?.to}.csv`;
+  a.download = `${filename}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
 
-  toast('Reporte descargado con marca de agua y metadatos de auditoría');
+async function downloadXLSX(report, data, filename) {
+  const XLSX = await loadSheetJS();
+  const wb = XLSX.utils.book_new();
+
+  // Hoja de metadatos
+  const metaRows = [
+    ['Centro Médico Premier'],
+    [`Reporte de ${report.report_type.toUpperCase()}`],
+    ['Documento confidencial - uso interno'],
+    [],
+    ['Generado por', S.profile?.full_name || ''],
+    ['Generado el', report.generated_at],
+    ['Período', `${report.metadata?.filters?.from} al ${report.metadata?.filters?.to}`],
+    []
+  ];
+
+  if (report.report_type === 'financial') {
+    // Hoja de facturas
+    const invoiceRows = [
+      ['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado'],
+      ...(data.invoices || []).map(inv => [inv.number, inv.patient, inv.date, inv.total, inv.method || '', inv.status])
+    ];
+    const ws1 = XLSX.utils.aoa_to_sheet(invoiceRows);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Facturas');
+
+    // Hoja de totales
+    const totalRows = [
+      ...metaRows,
+      ['TOTALES'],
+      ['Total facturas', data.totals?.total_invoices || 0],
+      ['Monto total', data.totals?.total_amount || 0],
+      ['Efectivo', data.totals?.cash_total || 0],
+      ['Tarjeta', data.totals?.card_total || 0]
+    ];
+    const ws2 = XLSX.utils.aoa_to_sheet(totalRows);
+    XLSX.utils.book_append_sheet(wb, ws2, 'Resumen');
+  } else if (report.report_type === 'clinical') {
+    const consultRows = [
+      ['Fecha', 'Paciente', 'Médico', 'Diagnóstico', 'Estado'],
+      ...(data.consultations || []).map(c => [c.date, c.patient, c.doctor, c.diagnosis || '', c.finalized ? 'Finalizada' : 'En curso'])
+    ];
+    const ws1 = XLSX.utils.aoa_to_sheet(consultRows);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Consultas');
+
+    const totalRows = [...metaRows, ['Total consultas', data.totals?.total_consultations || 0]];
+    const ws2 = XLSX.utils.aoa_to_sheet(totalRows);
+    XLSX.utils.book_append_sheet(wb, ws2, 'Resumen');
+  } else if (report.report_type === 'inventory') {
+    const prodRows = [
+      ['Nombre', 'Stock Actual', 'Stock Mínimo', 'Precio'],
+      ...(data.products || []).map(p => [p.name, p.stock, p.min_stock, p.price])
+    ];
+    const ws1 = XLSX.utils.aoa_to_sheet(prodRows);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Productos');
+
+    const batchRows = [
+      ['Producto', 'Lote', 'Vencimiento', 'Restante'],
+      ...(data.batches || []).map(b => [b.products?.name || '', b.batch_number, b.expiration_date, b.remaining_quantity])
+    ];
+    const ws2 = XLSX.utils.aoa_to_sheet(batchRows);
+    XLSX.utils.book_append_sheet(wb, ws2, 'Lotes');
+
+    const totalRows = [
+      ...metaRows,
+      ['TOTALES'],
+      ['Total productos', data.totals?.total_products || 0],
+      ['Stock bajo', data.totals?.low_stock || 0],
+      ['Próximos a vencer', data.totals?.expiring_soon || 0]
+    ];
+    const ws3 = XLSX.utils.aoa_to_sheet(totalRows);
+    XLSX.utils.book_append_sheet(wb, ws3, 'Resumen');
+  } else if (report.report_type === 'patients') {
+    const patRows = [
+      ['Nombre', 'DPI', 'Fecha Nacimiento', 'Teléfono'],
+      ...(data.patients || []).map(p => [`${p.first_name} ${p.last_name}`, p.dpi, p.birth_date, p.phone || ''])
+    ];
+    const ws1 = XLSX.utils.aoa_to_sheet(patRows);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Pacientes');
+
+    const apptRows = [
+      ['Fecha', 'Estado'],
+      ...(data.appointments || []).map(a => [a.starts_at, a.status])
+    ];
+    const ws2 = XLSX.utils.aoa_to_sheet(apptRows);
+    XLSX.utils.book_append_sheet(wb, ws2, 'Citas');
+
+    const totalRows = [
+      ...metaRows,
+      ['TOTALES'],
+      ['Total pacientes', data.totals?.total_patients || 0],
+      ['Total citas', data.totals?.total_appointments || 0],
+      ['Atendidas', data.totals?.attended || 0],
+      ['Canceladas', data.totals?.cancelled || 0]
+    ];
+    const ws3 = XLSX.utils.aoa_to_sheet(totalRows);
+    XLSX.utils.book_append_sheet(wb, ws3, 'Resumen');
+  }
+
+  XLSX.writeFile(wb, `${filename}.xlsx`);
+}
+
+async function downloadPDF(report, data, filename) {
+  const { jsPDF } = await loadJsPDF();
+  const doc = new jsPDF();
+
+  // Marca de agua
+  doc.setTextColor(200, 200, 200);
+  doc.setFontSize(40);
+  doc.text('CONFIDENCIAL', 105, 150, { align: 'center', angle: 45 });
+
+  // Encabezado
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(18);
+  doc.text('Centro Médico Premier', 105, 20, { align: 'center' });
+  
+  doc.setFontSize(14);
+  doc.text(`Reporte de ${report.report_type.toUpperCase()}`, 105, 30, { align: 'center' });
+
+  // Metadatos
+  doc.setFontSize(10);
+  doc.text(`Generado por: ${S.profile?.full_name || 'Sistema'}`, 14, 45);
+  doc.text(`Fecha: ${fmtDT(report.generated_at)}`, 14, 50);
+  doc.text(`Período: ${fmtD(report.metadata?.filters?.from)} al ${fmtD(report.metadata?.filters?.to)}`, 14, 55);
+
+  let yPos = 65;
+
+  if (report.report_type === 'financial') {
+    doc.autoTable({
+      startY: yPos,
+      head: [['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado']],
+      body: (data.invoices || []).map(inv => [
+        inv.number, inv.patient, fmtDT(inv.date), money(inv.total), inv.method || '-', inv.status
+      ]),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    doc.setFontSize(12);
+    doc.text('TOTALES', 14, yPos);
+    yPos += 7;
+    doc.setFontSize(10);
+    doc.text(`Total facturas: ${data.totals?.total_invoices || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Monto total: ${money(data.totals?.total_amount || 0)}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Efectivo: ${money(data.totals?.cash_total || 0)}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Tarjeta: ${money(data.totals?.card_total || 0)}`, 14, yPos);
+  } else if (report.report_type === 'clinical') {
+    doc.autoTable({
+      startY: yPos,
+      head: [['Fecha', 'Paciente', 'Médico', 'Diagnóstico', 'Estado']],
+      body: (data.consultations || []).map(c => [
+        fmtDT(c.date), c.patient, c.doctor, c.diagnosis || '-', c.finalized ? 'Finalizada' : 'En curso'
+      ]),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    doc.setFontSize(12);
+    doc.text(`Total consultas: ${data.totals?.total_consultations || 0}`, 14, yPos);
+  } else if (report.report_type === 'inventory') {
+    doc.text('PRODUCTOS', 14, yPos);
+    yPos += 5;
+    doc.autoTable({
+      startY: yPos,
+      head: [['Nombre', 'Stock', 'Mínimo', 'Precio']],
+      body: (data.products || []).map(p => [p.name, p.stock, p.min_stock, money(p.price)]),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    if (yPos > 250) {
+      doc.addPage();
+      yPos = 20;
+    }
+    
+    doc.text('LOTES', 14, yPos);
+    yPos += 5;
+    doc.autoTable({
+      startY: yPos,
+      head: [['Producto', 'Lote', 'Vencimiento', 'Restante']],
+      body: (data.batches || []).map(b => [b.products?.name || '', b.batch_number, fmtD(b.expiration_date), b.remaining_quantity]),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    doc.setFontSize(12);
+    doc.text('TOTALES', 14, yPos);
+    yPos += 7;
+    doc.setFontSize(10);
+    doc.text(`Total productos: ${data.totals?.total_products || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Stock bajo: ${data.totals?.low_stock || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Próximos a vencer: ${data.totals?.expiring_soon || 0}`, 14, yPos);
+  } else if (report.report_type === 'patients') {
+    doc.text('PACIENTES', 14, yPos);
+    yPos += 5;
+    doc.autoTable({
+      startY: yPos,
+      head: [['Nombre', 'DPI', 'Nacimiento', 'Teléfono']],
+      body: (data.patients || []).map(p => [`${p.first_name} ${p.last_name}`, p.dpi, fmtD(p.birth_date), p.phone || '-']),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    if (yPos > 250) {
+      doc.addPage();
+      yPos = 20;
+    }
+    
+    doc.text('CITAS', 14, yPos);
+    yPos += 5;
+    doc.autoTable({
+      startY: yPos,
+      head: [['Fecha', 'Estado']],
+      body: (data.appointments || []).map(a => [fmtDT(a.starts_at), a.status]),
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    doc.setFontSize(12);
+    doc.text('TOTALES', 14, yPos);
+    yPos += 7;
+    doc.setFontSize(10);
+    doc.text(`Total pacientes: ${data.totals?.total_patients || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Total citas: ${data.totals?.total_appointments || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Atendidas: ${data.totals?.attended || 0}`, 14, yPos);
+    yPos += 5;
+    doc.text(`Canceladas: ${data.totals?.cancelled || 0}`, 14, yPos);
+  }
+
+  // Pie de página
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setTextColor(150, 150, 150);
+    doc.text(
+      `Documento confidencial - uso interno | Página ${i} de ${pageCount}`,
+      105, 290, { align: 'center' }
+    );
+  }
+
+  doc.save(`${filename}.pdf`);
 }
