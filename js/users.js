@@ -1,22 +1,145 @@
-import { sb, S, $, esc, toast, fail, fmtDT, tbl } from './core.js';
+import { sb, $, esc, isRole, toast, fail, tbl, audit, S } from './core.js';
 
-const ROLES = ['admin', 'doctor', 'nurse', 'pharmacist', 'cashier', 'patient'];
+const STAFF_ROLES = ['admin', 'doctor', 'nurse', 'pharmacist', 'cashier'];
 
 export async function render(el) {
-  const [{ data: us, error }, { data: logs }] = await Promise.all([
+  if (!isRole('admin')) {
+    el.innerHTML = '<div class="bar"><h2>Acceso Denegado</h2></div><p class="muted">Solo los administradores pueden gestionar usuarios y auditoría.</p>';
+    return;
+  }
+
+  // Cargar datos en paralelo para optimizar rendimiento
+  const [{ data: users, error: errUsers }, { data: invites, error: errInvites }, { data: logs }] = await Promise.all([
     sb.from('profiles').select('*').order('created_at', { ascending: false }),
-    sb.from('audit_logs').select('user_id,action,entity,entity_id,created_at').order('created_at', { ascending: false }).limit(100)]);
-  if (error) return fail(error);
-  const names = Object.fromEntries(us.map(u => [u.id, u.full_name || u.email]));
-  el.innerHTML = `<div class="bar"><h2>Usuarios y roles</h2></div>
-  <p class="muted">Los usuarios nuevos se crean como <b>paciente</b>. Asigne aquí el rol de personal (médico, enfermería, farmacéutico, cajero).</p>
-  ${tbl(['Nombre', 'Correo', 'Rol', ''], us.map(u => [esc(u.full_name), esc(u.email), `<select data-r="${u.id}" ${u.id === S.user.id ? 'disabled' : ''}>${ROLES.map(r => `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}</select>`, u.id === S.user.id ? '(usted)' : `<button class="btn sm" data-s="${u.id}">Guardar</button>`]))}
-  <h2 style="margin:22px 0 10px">Auditoría (últimos 100 eventos)</h2>
-  ${tbl(['Fecha', 'Usuario', 'Acción', 'Entidad', 'ID'], (logs || []).map(l => [fmtDT(l.created_at), esc(names[l.user_id] || 'sistema'), esc(l.action), esc(l.entity), `<span class="muted">${esc((l.entity_id || '').slice(0, 8))}</span>`]))}`;
-  el.onclick = async e => {
-    const id = e.target.dataset.s; if (!id) return;
-    const role = $(`select[data-r="${id}"]`).value;
-    const { error } = await sb.from('profiles').update({ role }).eq('id', id);
-    error ? fail(error) : toast('Rol actualizado');
-  };
+    sb.from('staff_invites').select('*').order('created_at', { ascending: false }),
+    sb.from('audit_logs').select('user_id, action, entity, entity_id, detail, created_at').order('created_at', { ascending: false }).limit(50)
+  ]);
+
+  if (errUsers || errInvites) return fail(errUsers || errInvites);
+
+  el.innerHTML = `
+    <div class="bar"><h2>Usuarios y Auditoría</h2></div>
+    
+    <!-- Sección 1: Invitar Personal -->
+    <div class="card" style="margin-bottom:1rem">
+      <h3>Invitar nuevo personal</h3>
+      <p class="muted">El usuario deberá registrarse con este correo. El sistema le asignará automáticamente el rol de personal.</p>
+      <form id="invite-form" style="display:grid; grid-template-columns: 2fr 2fr 1fr auto; gap:0.5rem; align-items:end;">
+        <div>
+          <label>Correo electrónico</label>
+          <input type="email" name="email" required placeholder="ejemplo@clinica.com" style="width:100%">
+        </div>
+        <div>
+          <label>Nombre completo</label>
+          <input type="text" name="full_name" required placeholder="Dr. Juan Pérez" style="width:100%">
+        </div>
+        <div>
+          <label>Rol</label>
+          <select name="role" required style="width:100%">
+            ${STAFF_ROLES.map(r => `<option value="${r}">${r}</option>`).join('')}
+          </select>
+        </div>
+        <button type="submit" class="btn">Invitar</button>
+      </form>
+    </div>
+
+    <!-- Sección 2: Invitaciones Pendientes -->
+    ${invites && invites.length > 0 ? `
+    <div class="card" style="margin-bottom:1rem">
+      <h3>Invitaciones pendientes</h3>
+      ${tbl(['Correo', 'Nombre', 'Rol', 'Fecha', 'Acción'], invites.map(inv => [
+        esc(inv.email),
+        esc(inv.full_name),
+        `<span class="badge">${esc(inv.role)}</span>`,
+        esc(new Date(inv.created_at).toLocaleDateString('es-GT')),
+        `<button class="btn sm bad" data-cancel-invite="${inv.id}">Cancelar</button>`
+      ]))}
+    </div>` : ''}
+
+    <!-- Sección 3: Usuarios Registrados -->
+    <div class="card">
+      <h3>Usuarios registrados</h3>
+      <p class="muted">Los pacientes se registran por sí mismos. El personal debe ser invitado desde el formulario superior.</p>
+      ${tbl(['Nombre', 'Correo', 'Rol', 'Acción'], (users || []).map(u => [
+        esc(u.full_name || 'Sin nombre'),
+        esc(u.email),
+        `<select data-role="${u.id}" ${u.id === S.user.id ? 'disabled' : ''}>
+          ${['patient', ...STAFF_ROLES].map(r => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
+        </select>`,
+        u.id === S.user.id ? '<span class="muted">(Usted)</span>' : `<button class="btn sm" data-save-role="${u.id}">Guardar</button>`
+      ]))}
+    </div>
+
+    <!-- Sección 4: Auditoría Reciente -->
+    <div class="card" style="margin-top:1rem">
+      <h3>Auditoría reciente</h3>
+      ${tbl(['Usuario', 'Acción', 'Entidad', 'Detalle', 'Fecha'], (logs || []).map(l => {
+        const userName = users?.find(u => u.id === l.user_id)?.full_name || 'Sistema';
+        const detailStr = l.detail ? JSON.stringify(l.detail).substring(0, 40) + (JSON.stringify(l.detail).length > 40 ? '...' : '') : '-';
+        return [
+          esc(userName),
+          `<span class="badge">${esc(l.action)}</span>`,
+          esc(l.entity),
+          esc(l.entity_id || detailStr),
+          esc(new Date(l.created_at).toLocaleString('es-GT'))
+        ];
+      }))}
+    </div>
+  `;
+
+  // --- Event Listeners ---
+  
+  // 1. Enviar invitación
+  const inviteForm = $('#invite-form', el);
+  if (inviteForm) {
+    inviteForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const payload = {
+        email: formData.get('email').trim().toLowerCase(),
+        full_name: formData.get('full_name').trim(),
+        role: formData.get('role'),
+        invited_by: S.user.id
+      };
+
+      const { error } = await sb.from('staff_invites').insert(payload);
+      if (error) {
+        fail(error);
+      } else {
+        toast('Invitación creada. El usuario debe registrarse con este correo.');
+        await audit('invite_created', 'staff_invites', null, { email: payload.email, role: payload.role });
+        render(el); // Recargar vista
+      }
+    };
+  }
+
+  // 2. Delegación de eventos para botones dinámicos
+  el.addEventListener('click', async (e) => {
+    // Guardar cambio de rol manual (corrección)
+    const saveBtn = e.target.closest('[data-save-role]');
+    if (saveBtn) {
+      const id = saveBtn.dataset.saveRole;
+      const role = $(`select[data-role="${id}"]`, el).value;
+      const { error } = await sb.from('profiles').update({ role }).eq('id', id);
+      if (error) fail(error);
+      else {
+        toast('Rol actualizado');
+        await audit('role_updated', 'profiles', id, { new_role: role });
+      }
+      return;
+    }
+
+    // Cancelar invitación pendiente
+    const cancelBtn = e.target.closest('[data-cancel-invite]');
+    if (cancelBtn) {
+      const id = cancelBtn.dataset.cancelInvite;
+      const { error } = await sb.from('staff_invites').delete().eq('id', id);
+      if (error) fail(error);
+      else {
+        toast('Invitación cancelada');
+        await audit('invite_cancelled', 'staff_invites', id);
+        render(el);
+      }
+    }
+  });
 }
