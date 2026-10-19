@@ -391,28 +391,360 @@ function openReportPreview(report, userNames = {}) {
   $('#preview-download', el).onclick = () => downloadReport(report, userNames);
 }
 
-async function downloadReport(report, userNames = {}) {
-  const data = report.metadata?.data;
-  if (!data) {
-    toast('Este reporte no tiene datos disponibles', true);
-    return;
-  }
+async function downloadPDF(report, data, filename, userNames = {}) {
+  const { jsPDF } = await loadJsPDF();
+  const doc = new jsPDF();
 
-  const format = report.file_format;
-  const filename = `reporte_${report.report_type}_${report.metadata?.filters?.from}_a_${report.metadata?.filters?.to}`;
+  // Encabezado institucional
+  doc.setFillColor(41, 128, 185);
+  doc.rect(0, 0, 210, 35, 'F');
+  
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(20);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Centro Médico Premier', 14, 15);
+  
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Reporte de ${report.report_type.toUpperCase()}`, 14, 25);
 
-  try {
-    if (format === 'csv') {
-      downloadCSV(report, data, filename, userNames);
-    } else if (format === 'xlsx') {
-      await downloadXLSX(report, data, filename, userNames);
-    } else if (format === 'pdf') {
-      await downloadPDF(report, data, filename, userNames);
+  // Información del reporte
+  doc.setTextColor(60, 60, 60);
+  doc.setFontSize(10);
+  
+  let yPos = 45;
+  
+  // Caja de información
+  doc.setFillColor(245, 245, 245);
+  doc.rect(14, yPos - 5, 182, 25, 'F');
+  
+  doc.setFont('helvetica', 'bold');
+  doc.text('Información del Reporte', 18, yPos);
+  yPos += 7;
+  
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Generado por: ${userNames[report.generated_by] || 'Sistema'}`, 18, yPos);
+  yPos += 5;
+  doc.text(`Fecha de generación: ${fmtDT(report.generated_at)}`, 18, yPos);
+  yPos += 5;
+  doc.text(`Período: ${fmtD(report.metadata?.filters?.from)} al ${fmtD(report.metadata?.filters?.to)}`, 18, yPos);
+
+  yPos += 15;
+
+  // Contenido según tipo de reporte
+  if (report.report_type === 'financial') {
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Detalle de Facturas', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado']],
+      body: (data.invoices || []).map(inv => [
+        inv.number, 
+        inv.patient, 
+        fmtDT(inv.date), 
+        money(inv.total), 
+        inv.method || '-', 
+        inv.status
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    // Resumen financiero
+    doc.setFillColor(232, 245, 253);
+    doc.rect(14, yPos - 5, 182, 35, 'F');
+    
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Resumen Financiero', 18, yPos);
+    yPos += 8;
+    
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(60, 60, 60);
+    doc.text(`Total de facturas: ${data.totals?.total_invoices || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Monto total facturado: ${money(data.totals?.total_amount || 0)}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Ingresos en efectivo: ${money(data.totals?.cash_total || 0)}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Ingresos por tarjeta: ${money(data.totals?.card_total || 0)}`, 18, yPos);
+
+  } else if (report.report_type === 'clinical') {
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Detalle de Consultas', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Fecha', 'Paciente', 'Médico', 'Diagnóstico', 'Estado']],
+      body: (data.consultations || []).map(c => [
+        fmtDT(c.date), 
+        c.patient, 
+        c.doctor, 
+        c.diagnosis || '-', 
+        c.finalized ? 'Finalizada' : 'En curso'
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    doc.setFillColor(232, 245, 253);
+    doc.rect(14, yPos - 5, 182, 20, 'F');
+    
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Resumen Clínico', 18, yPos);
+    yPos += 8;
+    
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(60, 60, 60);
+    doc.text(`Total de consultas: ${data.totals?.total_consultations || 0}`, 18, yPos);
+
+  } else if (report.report_type === 'inventory') {
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Inventario de Productos', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Nombre', 'Stock Actual', 'Stock Mínimo', 'Precio']],
+      body: (data.products || []).map(p => [
+        p.name, 
+        p.stock, 
+        p.min_stock, 
+        money(p.price)
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    if (yPos > 240) {
+      doc.addPage();
+      yPos = 20;
     }
-    toast(`Reporte ${format.toUpperCase()} descargado con marca de agua y metadatos de auditoría`);
-  } catch (err) {
-    fail(err);
+
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Control de Lotes', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Producto', 'Lote', 'Vencimiento', 'Restante']],
+      body: (data.batches || []).map(b => [
+        b.products?.name || '', 
+        b.batch_number, 
+        fmtD(b.expiration_date), 
+        b.remaining_quantity
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    doc.setFillColor(232, 245, 253);
+    doc.rect(14, yPos - 5, 182, 28, 'F');
+    
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Resumen de Inventario', 18, yPos);
+    yPos += 8;
+    
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(60, 60, 60);
+    doc.text(`Total de productos: ${data.totals?.total_products || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Productos con stock bajo: ${data.totals?.low_stock || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Lotes próximos a vencer: ${data.totals?.expiring_soon || 0}`, 18, yPos);
+
+  } else if (report.report_type === 'patients') {
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Registro de Pacientes', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Nombre', 'DPI', 'Nacimiento', 'Teléfono']],
+      body: (data.patients || []).map(p => [
+        `${p.first_name} ${p.last_name}`, 
+        p.dpi, 
+        fmtD(p.birth_date), 
+        p.phone || '-'
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    if (yPos > 240) {
+      doc.addPage();
+      yPos = 20;
+    }
+
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Registro de Citas', 14, yPos);
+    yPos += 5;
+
+    doc.autoTable({
+      startY: yPos,
+      head: [['Fecha', 'Estado']],
+      body: (data.appointments || []).map(a => [
+        fmtDT(a.starts_at), 
+        a.status
+      ]),
+      theme: 'grid',
+      headStyles: { 
+        fillColor: [41, 128, 185],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [60, 60, 60]
+      },
+      alternateRowStyles: {
+        fillColor: [248, 249, 250]
+      },
+      margin: { left: 14, right: 14 }
+    });
+
+    yPos = doc.lastAutoTable.finalY + 10;
+    
+    doc.setFillColor(232, 245, 253);
+    doc.rect(14, yPos - 5, 182, 32, 'F');
+    
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(41, 128, 185);
+    doc.text('Resumen de Pacientes y Citas', 18, yPos);
+    yPos += 8;
+    
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(60, 60, 60);
+    doc.text(`Total de pacientes: ${data.totals?.total_patients || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Total de citas: ${data.totals?.total_appointments || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Citas atendidas: ${data.totals?.attended || 0}`, 18, yPos);
+    yPos += 6;
+    doc.text(`Citas canceladas: ${data.totals?.cancelled || 0}`, 18, yPos);
   }
+
+  // Pie de página profesional
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    
+    // Línea separadora
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(0.5);
+    doc.line(14, 282, 196, 282);
+    
+    // Texto del pie
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(120, 120, 120);
+    doc.text('Centro Médico Premier', 14, 287);
+    doc.text(`Página ${i} de ${pageCount}`, 196, 287, { align: 'right' });
+    doc.text(`Generado: ${fmtDT(report.generated_at)}`, 105, 287, { align: 'center' });
+  }
+
+  doc.save(`${filename}.pdf`);
 }
 
 function downloadCSV(report, data, filename, userNames = {}) {
