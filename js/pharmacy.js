@@ -264,7 +264,7 @@ function openOrderModal(products, suppliers, onClose) {
   const { el, close } = openModal('Nueva Orden de Compra', `
     <form id="order-form" style="display:grid; gap:0.75rem;">
       <div>
-        <label>Proveedor</label>
+        <label>Proveedor *</label>
         <select name="supplier_id" required style="width:100%">
           <option value="">Seleccionar proveedor...</option>
           ${suppliers.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
@@ -276,6 +276,11 @@ function openOrderModal(products, suppliers, onClose) {
           <h4 style="margin:0;">Productos de la orden</h4>
           <button type="button" class="btn sm" id="btn-add-product">+ Agregar producto</button>
         </div>
+        
+        <div style="background:#f5f5f5; padding:0.5rem; border-radius:4px; margin-bottom:0.5rem; font-size:0.85em;">
+          <strong>Campos obligatorios por producto:</strong> Producto, Cantidad, Precio, <span style="color:#c62828">Lote</span> y <span style="color:#c62828">Vencimiento</span>
+        </div>
+        
         <div id="order-items"></div>
         <div style="display:flex; justify-content:flex-end; margin-top:0.5rem; font-size:1.2rem;">
           <strong>Total: <span id="order-total">Q0.00</span></strong>
@@ -298,19 +303,46 @@ function openOrderModal(products, suppliers, onClose) {
   const paintItems = () => {
     itemsEl.innerHTML = items.length
       ? items.map((item, idx) => `
-        <div style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
-          <select data-idx="${idx}" data-field="product_id" required style="width:100%">
-            <option value="">Producto...</option>
-            ${products.map(p => `<option value="${p.id}" ${p.id === item.product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-          </select>
-          <input type="number" data-idx="${idx}" data-field="quantity" value="${item.quantity}" min="1" required placeholder="Cant." style="width:100%">
-          <input type="number" data-idx="${idx}" data-field="unit_price" value="${item.unit_price}" step="0.01" min="0" required placeholder="Precio" style="width:100%">
-          <input type="text" data-idx="${idx}" data-field="batch_number" value="${item.batch_number}" placeholder="Lote" style="width:100%">
-          <input type="date" data-idx="${idx}" data-field="expiration_date" value="${item.expiration_date}" style="width:100%">
-          <button type="button" class="btn sm bad" data-remove="${idx}">✕</button>
+        <div style="border:1px solid #ddd; padding:0.75rem; margin-bottom:0.75rem; border-radius:4px; background:white;">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.5rem; margin-bottom:0.5rem;">
+            <div>
+              <label style="font-size:0.9em; font-weight:bold;">Producto *</label>
+              <select data-idx="${idx}" data-field="product_id" required style="width:100%">
+                <option value="">Seleccionar producto...</option>
+                ${products.map(p => `<option value="${p.id}" ${p.id === item.product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label style="font-size:0.9em; font-weight:bold;">Cantidad *</label>
+              <input type="number" data-idx="${idx}" data-field="quantity" value="${item.quantity}" min="1" required placeholder="Ej: 100" style="width:100%">
+            </div>
+          </div>
+          
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.5rem; margin-bottom:0.5rem;">
+            <div>
+              <label style="font-size:0.9em; font-weight:bold;">Precio unitario (Q) *</label>
+              <input type="number" data-idx="${idx}" data-field="unit_price" value="${item.unit_price}" step="0.01" min="0" required placeholder="Ej: 25.50" style="width:100%">
+            </div>
+            <div>
+              <label style="font-size:0.9em; font-weight:bold; color:#c62828;">Número de Lote * <span style="font-size:0.8em; font-weight:normal;">(del proveedor)</span></label>
+              <input type="text" data-idx="${idx}" data-field="batch_number" value="${item.batch_number}" required placeholder="Ej: LOT-2026-001" style="width:100%; border:2px solid #ffcdd2;">
+            </div>
+          </div>
+          
+          <div style="display:grid; grid-template-columns: 1fr auto; gap:0.5rem; align-items:end;">
+            <div>
+              <label style="font-size:0.9em; font-weight:bold; color:#c62828;">Fecha de Vencimiento * <span style="font-size:0.8em; font-weight:normal;">(según proveedor)</span></label>
+              <input type="date" data-idx="${idx}" data-field="expiration_date" value="${item.expiration_date}" required style="width:100%; border:2px solid #ffcdd2;">
+            </div>
+            <button type="button" class="btn sm bad" data-remove="${idx}" style="margin-bottom:0;">✕ Eliminar</button>
+          </div>
+          
+          <div style="margin-top:0.5rem; text-align:right; font-size:0.9em; color:#666;">
+            Subtotal: <strong>Q${(Number(item.quantity || 0) * Number(item.unit_price || 0)).toFixed(2)}</strong>
+          </div>
         </div>
       `).join('')
-      : '<p class="muted">Sin productos. Agregue al menos uno.</p>';
+      : '<p class="muted">Sin productos. Presione "+ Agregar producto" para comenzar.</p>';
 
     const total = items.reduce((sum, i) => sum + (Number(i.quantity) * Number(i.unit_price)), 0);
     totalEl.textContent = money(total);
@@ -326,8 +358,7 @@ function openOrderModal(products, suppliers, onClose) {
     const field = e.target.dataset.field;
     if (idx !== undefined && field) {
       items[Number(idx)][field] = field === 'product_id' || field === 'batch_number' ? e.target.value : Number(e.target.value);
-      const total = items.reduce((sum, i) => sum + (Number(i.quantity) * Number(i.unit_price)), 0);
-      totalEl.textContent = money(total);
+      paintItems();
     }
   };
 
@@ -343,9 +374,7 @@ function openOrderModal(products, suppliers, onClose) {
     e.preventDefault();
     const formData = new FormData(e.target);
 
-    if (items.length === 0) {
-      return fail('Agregue al menos un producto a la orden.');
-    }
+    if (items.length === 0) return fail('Agregue al menos un producto a la orden.');
 
     const cleanItems = items.map(item => {
       const product = products.find(p => p.id === item.product_id);
@@ -359,24 +388,34 @@ function openOrderModal(products, suppliers, onClose) {
       };
     });
 
-    if (cleanItems.some(i => !i.product_id || !i.batch_number || !i.expiration_date)) {
-      return fail('Complete todos los campos de cada producto (incluyendo lote y vencimiento).');
+    // Validación más específica
+    const missing = [];
+    cleanItems.forEach((item, idx) => {
+      const errors = [];
+      if (!item.product_id) errors.push('Producto');
+      if (!item.batch_number) errors.push('Lote');
+      if (!item.expiration_date) errors.push('Vencimiento');
+      if (errors.length > 0) {
+        missing.push(`Producto ${idx + 1}: faltan ${errors.join(', ')}`);
+      }
+    });
+
+    if (missing.length > 0) {
+      return fail('Campos incompletos:\n' + missing.join('\n'));
     }
 
     const total = cleanItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
 
-    const payload = {
+    const { error } = await sb.from('purchase_orders').insert({
       supplier_id: formData.get('supplier_id'),
       items: cleanItems,
       total: total,
       status: 'pendiente',
       notes: formData.get('notes') || null
-    };
+    });
 
-    const { error } = await sb.from('purchase_orders').insert(payload);
-    if (error) {
-      fail(error);
-    } else {
+    if (error) fail(error);
+    else {
       toast('Orden de compra creada exitosamente');
       close();
       onClose();
