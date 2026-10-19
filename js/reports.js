@@ -1,6 +1,5 @@
 import { sb, $, $$, esc, isRole, toast, fail, tbl, money, fmtD, fmtDT, S, openModal } from './core.js';
 
-// Cargar librerías dinámicamente solo cuando se necesiten
 async function loadSheetJS() {
   if (window.XLSX) return window.XLSX;
   const script = document.createElement('script');
@@ -36,10 +35,16 @@ export async function render(el) {
   const isAdmin = isRole('admin');
   const isDoctor = isRole('doctor');
   
-  const [{ data: reports }, { data: doctors }] = await Promise.all([
-    isAdmin ? sb.from('report_exports').select('*, profiles(full_name)').order('generated_at', { ascending: false }).limit(50) : { data: [] },
-    isDoctor || isAdmin ? sb.from('profiles').select('id, full_name').eq('role', 'doctor') : { data: [] }
+  // FIX: Cargar reportes SIN el embed problemático de profiles
+  // Luego cargamos los nombres de perfil por separado
+  const [{ data: reports }, { data: doctors }, { data: profiles }] = await Promise.all([
+    isAdmin ? sb.from('report_exports').select('*').order('generated_at', { ascending: false }).limit(50) : Promise.resolve({ data: [] }),
+    isDoctor || isAdmin ? sb.from('profiles').select('id, full_name').eq('role', 'doctor') : Promise.resolve({ data: [] }),
+    isAdmin ? sb.from('profiles').select('id, full_name') : Promise.resolve({ data: [] })
   ]);
+
+  // Crear mapa de nombres de usuario para mostrar en la tabla
+  const userNames = Object.fromEntries((profiles || []).map(p => [p.id, p.full_name]));
 
   el.innerHTML = `
     <div class="bar"><h2>Reportes Gerenciales</h2></div>
@@ -85,7 +90,7 @@ export async function render(el) {
         `<span class="badge">${esc(r.report_type)}</span>`,
         esc(r.row_count),
         esc(r.file_format.toUpperCase()),
-        esc(r.profiles?.full_name || 'Sistema'),
+        esc(userNames[r.generated_by] || 'Sistema'),
         `<button class="btn sm" data-view="${r.id}">Ver</button>
          <button class="btn sm" data-download="${r.id}">Descargar</button>`
       ])) : '<p class="muted">No hay reportes generados aún.</p>'}
@@ -97,7 +102,7 @@ export async function render(el) {
     const card = e.target.closest('.report-card');
     if (card) {
       const type = card.dataset.type;
-      openReportConfigModal(type, doctors?.data || [], el);
+      openReportConfigModal(type, doctors || [], el);
       return;
     }
 
@@ -105,7 +110,7 @@ export async function render(el) {
     if (viewBtn) {
       const id = viewBtn.dataset.view;
       const report = reports.find(r => r.id === id);
-      if (report) openReportPreview(report);
+      if (report) openReportPreview(report, userNames);
       return;
     }
 
@@ -113,7 +118,7 @@ export async function render(el) {
     if (downloadBtn) {
       const id = downloadBtn.dataset.download;
       const report = reports.find(r => r.id === id);
-      if (report) downloadReport(report);
+      if (report) downloadReport(report, userNames);
     }
   });
 }
@@ -258,14 +263,16 @@ function openReportConfigModal(type, doctors, parentEl) {
       render(parentEl);
       
       // Abrir vista previa inmediatamente
-      openReportPreview(report);
+      const { data: profiles } = await sb.from('profiles').select('id, full_name');
+      const userNames = Object.fromEntries((profiles || []).map(p => [p.id, p.full_name]));
+      openReportPreview(report, userNames);
     } catch (err) {
       fail(err);
     }
   };
 }
 
-function openReportPreview(report) {
+function openReportPreview(report, userNames = {}) {
   const data = report.metadata?.data;
   if (!data) {
     toast('Este reporte no tiene datos disponibles para visualizar', true);
@@ -369,6 +376,7 @@ function openReportPreview(report) {
       <div style="background:#e3f2fd; padding:0.75rem; border-radius:4px; border-left:4px solid #2196F3;">
         <strong>Período:</strong> ${fmtD(report.metadata?.filters?.from)} al ${fmtD(report.metadata?.filters?.to)}<br>
         <strong>Generado:</strong> ${fmtDT(report.generated_at)}<br>
+        <strong>Generado por:</strong> ${esc(userNames[report.generated_by] || 'Sistema')}<br>
         <strong>Filas:</strong> ${report.row_count}
       </div>
       ${contentHtml}
@@ -380,10 +388,10 @@ function openReportPreview(report) {
   `);
 
   $('#preview-close', el).onclick = close;
-  $('#preview-download', el).onclick = () => downloadReport(report);
+  $('#preview-download', el).onclick = () => downloadReport(report, userNames);
 }
 
-async function downloadReport(report) {
+async function downloadReport(report, userNames = {}) {
   const data = report.metadata?.data;
   if (!data) {
     toast('Este reporte no tiene datos disponibles', true);
@@ -395,11 +403,11 @@ async function downloadReport(report) {
 
   try {
     if (format === 'csv') {
-      downloadCSV(report, data, filename);
+      downloadCSV(report, data, filename, userNames);
     } else if (format === 'xlsx') {
-      await downloadXLSX(report, data, filename);
+      await downloadXLSX(report, data, filename, userNames);
     } else if (format === 'pdf') {
-      await downloadPDF(report, data, filename);
+      await downloadPDF(report, data, filename, userNames);
     }
     toast(`Reporte ${format.toUpperCase()} descargado con marca de agua y metadatos de auditoría`);
   } catch (err) {
@@ -407,14 +415,14 @@ async function downloadReport(report) {
   }
 }
 
-function downloadCSV(report, data, filename) {
+function downloadCSV(report, data, filename, userNames = {}) {
   let rows = [];
   
   rows.push(['Centro Médico Premier']);
   rows.push([`Reporte de ${report.report_type.toUpperCase()}`]);
   rows.push(['Documento confidencial - uso interno']);
   rows.push([]);
-  rows.push(['Generado por', S.profile?.full_name || '']);
+  rows.push(['Generado por', userNames[report.generated_by] || '']);
   rows.push(['Generado el', report.generated_at]);
   rows.push(['Período', `${report.metadata?.filters?.from} al ${report.metadata?.filters?.to}`]);
   rows.push([]);
@@ -493,24 +501,22 @@ function downloadCSV(report, data, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
-async function downloadXLSX(report, data, filename) {
+async function downloadXLSX(report, data, filename, userNames = {}) {
   const XLSX = await loadSheetJS();
   const wb = XLSX.utils.book_new();
 
-  // Hoja de metadatos
   const metaRows = [
     ['Centro Médico Premier'],
     [`Reporte de ${report.report_type.toUpperCase()}`],
     ['Documento confidencial - uso interno'],
     [],
-    ['Generado por', S.profile?.full_name || ''],
+    ['Generado por', userNames[report.generated_by] || ''],
     ['Generado el', report.generated_at],
     ['Período', `${report.metadata?.filters?.from} al ${report.metadata?.filters?.to}`],
     []
   ];
 
   if (report.report_type === 'financial') {
-    // Hoja de facturas
     const invoiceRows = [
       ['Número', 'Paciente', 'Fecha', 'Total', 'Método', 'Estado'],
       ...(data.invoices || []).map(inv => [inv.number, inv.patient, inv.date, inv.total, inv.method || '', inv.status])
@@ -518,7 +524,6 @@ async function downloadXLSX(report, data, filename) {
     const ws1 = XLSX.utils.aoa_to_sheet(invoiceRows);
     XLSX.utils.book_append_sheet(wb, ws1, 'Facturas');
 
-    // Hoja de totales
     const totalRows = [
       ...metaRows,
       ['TOTALES'],
@@ -594,16 +599,14 @@ async function downloadXLSX(report, data, filename) {
   XLSX.writeFile(wb, `${filename}.xlsx`);
 }
 
-async function downloadPDF(report, data, filename) {
+async function downloadPDF(report, data, filename, userNames = {}) {
   const { jsPDF } = await loadJsPDF();
   const doc = new jsPDF();
 
-  // Marca de agua
   doc.setTextColor(200, 200, 200);
   doc.setFontSize(40);
   doc.text('CONFIDENCIAL', 105, 150, { align: 'center', angle: 45 });
 
-  // Encabezado
   doc.setTextColor(0, 0, 0);
   doc.setFontSize(18);
   doc.text('Centro Médico Premier', 105, 20, { align: 'center' });
@@ -611,9 +614,8 @@ async function downloadPDF(report, data, filename) {
   doc.setFontSize(14);
   doc.text(`Reporte de ${report.report_type.toUpperCase()}`, 105, 30, { align: 'center' });
 
-  // Metadatos
   doc.setFontSize(10);
-  doc.text(`Generado por: ${S.profile?.full_name || 'Sistema'}`, 14, 45);
+  doc.text(`Generado por: ${userNames[report.generated_by] || 'Sistema'}`, 14, 45);
   doc.text(`Fecha: ${fmtDT(report.generated_at)}`, 14, 50);
   doc.text(`Período: ${fmtD(report.metadata?.filters?.from)} al ${fmtD(report.metadata?.filters?.to)}`, 14, 55);
 
@@ -734,7 +736,6 @@ async function downloadPDF(report, data, filename) {
     doc.text(`Canceladas: ${data.totals?.cancelled || 0}`, 14, yPos);
   }
 
-  // Pie de página
   const pageCount = doc.internal.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
