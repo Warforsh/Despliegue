@@ -2,7 +2,6 @@ import { sb, S, $, esc, isRole, SessionManager } from './core.js';
 import { authView } from './login.js';
 import { ico } from './icons.js';
 
-// Enlace de recuperación de contraseña (Supabase añade #...type=recovery)
 let RECOVERY = /type=recovery/.test(location.hash);
 
 const STAFF = ['admin', 'doctor', 'nurse', 'pharmacist', 'cashier'];
@@ -33,7 +32,6 @@ async function boot() {
   if (error) { await sb.auth.signOut(); return authView(boot); }
   S.profile = data;
   
-  // Iniciar monitoreo de sesión
   SessionManager.start();
   
   shell();
@@ -41,7 +39,6 @@ async function boot() {
   route();
 }
 
-// Menú lateral en móvil (panel deslizable)
 function setNav(open) {
   $('#side')?.classList.toggle('open', open);
   $('#scrim')?.classList.toggle('show', open);
@@ -67,20 +64,24 @@ function shell() {
   $('#burger').onclick = () => setNav(!$('#side').classList.contains('open'));
   $('#scrim').onclick = () => setNav(false);
   
-  // Cierre de sesión robusto: signOut se ejecuta SIEMPRE, aunque falle close_session
-  $('#out').onclick = async e => {
-    e.preventDefault();
+  $('#out').onclick = async e => { 
+    e.preventDefault(); 
     SessionManager.stop();
     try {
-      const { error } = await sb.rpc('close_session'); // rpc devuelve {error}, no lanza ni tiene .catch
-      if (error) console.warn('close_session:', error.message);
-    } catch (err) { console.warn('close_session:', err); }
-    try {
+      try { await sb.rpc('close_session'); } catch (err) { console.warn('RPC close_session error:', err); }
       await sb.auth.signOut({ scope: 'local' });
-    } catch (err) { console.warn('signOut:', err); }
-    S.user = S.profile = null;
-    location.hash = '';
-    boot();
+    } catch (err) {
+      console.warn('SignOut error:', err);
+    } finally {
+      S.user = null;
+      S.profile = null;
+      Object.keys(localStorage).forEach(k => { 
+        if (k.includes('sb-') && k.includes('auth')) localStorage.removeItem(k);
+      });
+      sessionStorage.clear();
+      location.hash = ''; 
+      boot(); 
+    }
   };
 }
 

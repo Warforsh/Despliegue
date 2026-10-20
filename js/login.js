@@ -1,9 +1,8 @@
 import { sb, $, esc, fail } from './core.js';
 
-// Clave pública de reCAPTCHA (segura de exponer en el frontend)
 const RECAPTCHA_SITE_KEY = '6LdqkvctAAAAAMnT94RurzY4y2LH6MGILFcEgylh';
 
-// Carga el CSS del login automáticamente (no hace falta tocar index.html)
+// Carga el CSS del login automáticamente
 if (!document.getElementById('lg-css')) {
   const l = document.createElement('link');
   l.id = 'lg-css'; l.rel = 'stylesheet'; l.href = new URL('../css/login.css', import.meta.url).href;
@@ -40,7 +39,7 @@ const ERR = [
   [/password.*(short|least|weak)/i, 'La contraseña es demasiado débil (mínimo 8 caracteres).'],
   [/same.*password|different from the old/i, 'La nueva contraseña debe ser distinta a la anterior.'],
   [/network|fetch/i, 'Sin conexión con el servidor. Verifique su internet.'],
-  [/captcha|recaptcha|seguridad/i, 'Verificación de seguridad fallida. Intente de nuevo.'],
+  [/seguridad|captcha/i, 'Verificación de seguridad fallida. Intente de nuevo.']
 ];
 const toEs = m => (ERR.find(([r]) => r.test(m || '')) || [, m || 'Ocurrió un error inesperado.'])[1];
 
@@ -82,13 +81,6 @@ export function authView(boot, mode = 'login') {
       ${mode === 'login' || mode === 'register' || mode === 'recovery' ? field('password', 'password', mode === 'login' ? 'Contraseña' : 'Contraseña (mín. 8)', 'lock', `autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" required minlength="${mode === 'login' ? 1 : 8}"`) : ''}
       ${mode === 'register' || mode === 'recovery' ? `<div class="lg-str" id="lg-str"><div><i></i><i></i><i></i><i></i></div><small></small></div>${field('password2', 'password', 'Confirmar contraseña', 'lock', 'autocomplete="new-password" required')}` : ''}
       ${mode === 'login' ? `<div class="lg-row"><label class="lg-chk"><input type="checkbox" id="lg-rem" ${saved ? 'checked' : ''}> Recordar mi correo</label><a data-m="forgot">¿Olvidó su contraseña?</a></div>` : '<div style="height:6px"></div>'}
-      
-      ${mode === 'login' ? `
-        <div class="lg-captcha" style="display:flex; justify-content:center; margin:1rem 0; min-height:78px;">
-          <div class="g-recaptcha" data-sitekey="${RECAPTCHA_SITE_KEY}" data-theme="light"></div>
-        </div>
-      ` : ''}
-      
       <button class="lg-btn" id="lg-go">${cta}</button>
     </form>
     <div class="lg-secure">${IC.lock.replace(/width="20" height="20"/, 'width="14" height="14"')} Conexión cifrada · Acceso protegido</div>
@@ -125,43 +117,22 @@ export function authView(boot, mode = 'login') {
     if ((mode === 'register' || mode === 'recovery') && f.password !== f.password2) { bad('password2'); return msg('Las contraseñas no coinciden.'); }
     if (mode === 'login' && !f.password) { bad('password'); return msg('Ingrese su contraseña.'); }
 
-    // Validación de reCAPTCHA (solo en login)
-    if (mode === 'login') {
-      const recaptchaToken = document.getElementById('g-recaptcha-response')?.value;
-      if (!recaptchaToken) {
-        msg('Por favor, complete la verificación de seguridad.');
-        return;
-      }
-    }
-
     busy(true);
     try {
       if (mode === 'login') {
-        const recaptchaToken = document.getElementById('g-recaptcha-response')?.value;
+        // 1. Ejecutar reCAPTCHA v3
+        const token = await grecaptcha.execute(RECAPTCHA_SITE_KEY, { action: 'login' });
         
-        // 1. Validar reCAPTCHA en el servidor (la clave secreta está protegida)
-        const { data: captchaResult, error: captchaError } = await sb.rpc('verify_recaptcha', {
-          p_token: recaptchaToken
-        });
+        // 2. Validar token en el servidor
+        const { data: captchaRes, error: captchaErr } = await sb.rpc('verify_recaptcha_v3', { p_token: token });
         
-        if (captchaError) {
-          console.warn('Error validando captcha:', captchaError);
-          // Degradación elegante: si el servidor falla, permitir login pero registrar
-        } else if (captchaResult && !captchaResult.success) {
-          // Captcha inválido
-          if (window.grecaptcha) window.grecaptcha.reset();
+        if (captchaErr || !captchaRes?.success || (captchaRes.score && captchaRes.score < 0.5)) {
           throw new Error('Verificación de seguridad fallida. Por favor, intente de nuevo.');
         }
 
-        // 2. Intentar login
+        // 3. Login
         const { data: authData, error } = await sb.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
-        if (error) {
-          if (window.grecaptcha) window.grecaptcha.reset();
-          throw error;
-        }
-
-        // 3. Resetear reCAPTCHA después de login exitoso
-        if (window.grecaptcha) window.grecaptcha.reset();
+        if (error) throw error;
 
         // 4. Verificación de multi-sesión
         try {
@@ -180,9 +151,7 @@ export function authView(boot, mode = 'login') {
             p_ip_address: null
           });
         } catch (sessionErr) {
-          if (sessionErr.message && sessionErr.message.includes('sesión activa')) {
-            throw sessionErr;
-          }
+          if (sessionErr.message && sessionErr.message.includes('sesión activa')) throw sessionErr;
           console.warn('Aviso de verificación de sesión:', sessionErr);
         }
 
