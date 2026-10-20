@@ -579,3 +579,44 @@ revoke execute on function public.generate_financial_report(date, date, text),
   public.generate_clinical_report(date, date, uuid) from public, anon;
 grant execute on function public.generate_financial_report(date, date, text), 
   public.generate_clinical_report(date, date, uuid) to authenticated;
+
+  -- =====================================================================
+-- CORRECCIÓN: Eliminar lógica de takeover en check_can_login
+-- Ahora bloquea SIEMPRE que haya una sesión activa, sin importar el tiempo
+-- =====================================================================
+
+CREATE OR REPLACE FUNCTION public.check_can_login(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_active_session record;
+  v_minutes_ago numeric;
+BEGIN
+  -- Buscar sesión activa no expirada
+  SELECT *, EXTRACT(EPOCH FROM (now() - last_activity)) / 60 AS minutes_ago
+  INTO v_active_session
+  FROM public.active_sessions
+  WHERE user_id = p_user_id
+    AND expires_at > now()
+  ORDER BY last_activity DESC
+  LIMIT 1;
+  
+  -- Si no hay sesión activa, permitir login
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('allowed', true);
+  END IF;
+  
+  -- SESIÓN ACTIVA ENCONTRADA: BLOQUEAR SIEMPRE (sin takeover)
+  v_minutes_ago := v_active_session.minutes_ago;
+  
+  RETURN jsonb_build_object(
+    'allowed', false,
+    'message', 'Este usuario ya tiene una sesión activa en otro dispositivo. Por seguridad, solo se permite una sesión a la vez. Cierra la otra sesión o espera a que expire automáticamente.',
+    'last_activity_minutes', round(v_minutes_ago, 1),
+    'device_info', v_active_session.device_info
+  );
+END $$;
+
