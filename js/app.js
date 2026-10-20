@@ -67,18 +67,20 @@ function shell() {
   $('#burger').onclick = () => setNav(!$('#side').classList.contains('open'));
   $('#scrim').onclick = () => setNav(false);
   
-  // Cierre de sesión robusto con detención del monitoreo
-  $('#out').onclick = async e => { 
-    e.preventDefault(); 
+  // Cierre de sesión robusto: signOut se ejecuta SIEMPRE, aunque falle close_session
+  $('#out').onclick = async e => {
+    e.preventDefault();
     SessionManager.stop();
     try {
-      await sb.rpc('close_session').catch(() => {});
+      const { error } = await sb.rpc('close_session'); // rpc devuelve {error}, no lanza ni tiene .catch
+      if (error) console.warn('close_session:', error.message);
+    } catch (err) { console.warn('close_session:', err); }
+    try {
       await sb.auth.signOut({ scope: 'local' });
-    } catch (err) {
-      console.warn('Logout error:', err);
-    }
-    location.hash = ''; 
-    boot(); 
+    } catch (err) { console.warn('signOut:', err); }
+    S.user = S.profile = null;
+    location.hash = '';
+    boot();
   };
 }
 

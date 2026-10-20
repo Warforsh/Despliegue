@@ -151,6 +151,7 @@ export const SessionManager = {
 
   async expireSession() {
     this.stop();
+    try { await sb.rpc('close_session'); } catch (err) { console.warn('close_session:', err); }
     try { await sb.auth.signOut({ scope: 'local' }); } catch (err) { console.warn('Expire error:', err); }
     S.user = null; S.profile = null;
     setTimeout(() => { location.hash = ''; location.reload(); }, 2000);
@@ -158,6 +159,16 @@ export const SessionManager = {
 
   async sendHeartbeat() {
     if (!S.user) return;
-    try { await sb.rpc('heartbeat_session'); } catch (err) { /* Ignorar errores de heartbeat */ }
+    try {
+      const { data, error } = await sb.rpc('heartbeat_session');
+      // false => la sesión fue cerrada/expirada en la BD: cerrar también en el navegador
+      if (!error && data === false) {
+        this.stop();
+        try { await sb.auth.signOut({ scope: 'local' }); } catch {}
+        S.user = null; S.profile = null;
+        toast('Su sesión fue cerrada.', true);
+        setTimeout(() => { location.hash = ''; location.reload(); }, 1500);
+      }
+    } catch (err) { /* Ignorar errores de red del heartbeat */ }
   }
 };
