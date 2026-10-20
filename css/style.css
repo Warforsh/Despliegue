@@ -160,3 +160,22 @@ tbody tr:hover{background:#f8fafc}
 }
 @media(max-width:600px){.audit-meta{white-space:normal;flex-direction:column;gap:2px}.audit-meta span:first-child{max-width:100%;overflow-wrap:anywhere}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+/* Ajustes para reCAPTCHA en el login */
+.lg-captcha {
+  display: flex;
+  justify-content: center;
+  margin: 1rem 0;
+  min-height: 78px;
+}
+
+.lg-captcha .g-recaptcha {
+  transform-origin: center;
+}
+
+/* Responsive: escalar reCAPTCHA en móviles */
+@media (max-width: 480px) {
+  .lg-captcha .g-recaptcha {
+    transform: scale(0.9);
+  }
+}
